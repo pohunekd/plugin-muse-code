@@ -1,2 +1,1 @@
 Muse Code updated 1.4.0-R1 -> 1.4.14-R7309.1<CR>
-<ESC>]7501;?<ESC>\<ESC>]10;?<BEL><ESC>]11;?<BEL><ESC>]4;0;?<BEL><ESC>]4;1;?<BEL><ESC>]4;2;?<BEL><ESC>]4;3;?<BEL><ESC>]4;4;?<BEL><ESC>]4;5;?<BEL><ESC>]4;6;?<BEL><ESC>]4;7;?<BEL><ESC>]4;8;?<BEL><ESC>]4;9;?<BEL><ESC>]4;10;?<BEL><ESC>]4;11;?<BEL><ESC>]4;12;?<BEL><ESC>]4;13;?<BEL><ESC>]4;14;?<BEL><ESC>]4;15;?<BEL>

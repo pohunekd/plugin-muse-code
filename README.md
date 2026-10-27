@@ -29,7 +29,7 @@ Handlers, reporters and parsers stay in the core repository
 | `compat/screens/<scenario>/<width>.txt` | Terminal screens at widths 20 to 200: trust, login, api-key, idle, working, done, approval, question, update-notice, clear, fork, resume, seed |
 | `compat/osc7501/` | OSC 7501 program-status records per scenario, terminal titles, the startup queries |
 | `compat/hooks/<scenario>/` | One JSON file per hook call: event, stdin payload, environment names, the `MUSE_*`/`TBH_*` values |
-| `compat/macos-arm64/` | The same layout for macOS arm64: install, help, and the login, api-key, trust, idle, working, done and update-notice screens, OSC 7501 records and titles |
+| `compat/macos-arm64/` | The same layout for macOS arm64: install, help, the login, api-key, trust, idle, working, done and update-notice screens, OSC 7501 records and titles, the default-HOME tree and the credential backend the sessions report |
 | `compat/sessions/` | Session store tree and the first records of a session (strings over 80 characters become `<N chars>`; host fields such as pids and free disk space are dropped) |
 
 ## No credentials, no real model
@@ -48,7 +48,7 @@ The kit never logs in, never stores a credential and never calls a real model:
 
 ## Running the kit
 
-Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, git, ps, socat, ip, mount,
+Needs bash 4+, tmux, curl, jq, sed, awk, perl, sha256sum, git, ps, socat, ip, mount,
 hostname and util-linux `unshare` 2.38+ with unprivileged user, network, mount
 and UTS namespaces (`--map-root-user`, `--map-user`).
 
@@ -64,7 +64,7 @@ streams. Run it on a disposable host or VM; never point it at a real HOME.
 Paths below `--root` are replaced in the evidence by a placeholder of the same
 width, so the layout of narrow screens is preserved.
 
-On macOS the kit runs the screen and OSC steps (`install version login trust turn update-notice`) under a `sandbox-exec` profile that denies all network access except loopback and unix sockets, with GNU sed, find, stat and date on the PATH (for example from nix) and `--out compat/macos-arm64`. The credential backend is forced to a file so the Keychain stays untouched.
+On macOS the kit runs the screen and OSC steps (`install version login trust turn update-notice`; `hooks`, `sessions` and `stub` are refused) under a `sandbox-exec` profile. The profile denies all network access, allows unix sockets only below `--root` (tmux), and denies the mach lookups that resolve names or reach the Keychain. GNU sed, stat, find and date must come first on the PATH (for example from nix), and `--out compat/macos-arm64` selects the evidence directory. The credential backend is forced to a file for every launcher, and the sessions report it in `compat/macos-arm64/sessions/credential-backend-*.txt`. Before the first step the kit proves that name resolution works outside the sandbox and fails inside it, that a documentation address and the resolver socket are unreachable, and its scan also looks for the host name, computer name, full name, serial number and hardware UUID, which it reads at run time. The profile restricts the network and the Keychain only: the CLI can still write below the real user's `~/Library`, so a dedicated throwaway user or a VM would be stronger.
 
 A new Muse release is captured by re-running the kit before the lock moves:
 `supported.below` stays at the next minor until the new captures pass.
@@ -107,16 +107,17 @@ Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox prof
 |---|---|
 | Release | Same release `1.4.14-R7309.1` and the same launcher (sha256 equal); the binary is a 423,687,488-byte Mach-O build |
 | OSC 7501 | Identical to Linux: probe `ESC ] 7501 ; ? ESC \` at startup, records only after it is answered, `app=muse`, states `idle`, `working`, `done`; terminal title is the directory name with a braille spinner while working |
-| Screens | Trust, login, api-key (not at width 20), working and done screens match Linux. The idle composer has an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame carries no SSH-projection notice |
+| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame has no SSH-projection notice |
 | Launcher notice | `Muse Code updated A -> B` as on Linux |
+| Credential backend | With `TBH_CREDENTIAL_BACKEND=file` the session record reports `credential_backend` `file` and `keychain_fallback_reason` `none`, in the default-HOME run and in the turn scenario |
 
-Not captured on macOS: hooks, sessions, the stub screens (no `socat`), the pane process (`ps` is refused inside the sandbox), and the Keychain behaviour (the file backend was forced). These stay unverified there.
+Not captured on macOS: hooks, session resume and fork, the stub screens (no `socat`), the pane process (`ps` is refused inside the sandbox), and the default Keychain backend (the file backend was forced). The default-HOME tree (`sessions/default-home-tree.txt`) is captured. The rest stays unverified there.
 
 ### Unverified
 
 - The first idle frame, the resume screens and the seed screen in a normal, non-namespaced run: unprivileged namespaces cannot map host root, so root-owned files appear owned by nobody and Muse prints the SSH-projection notice there. The footer itself is backed by `screens/done/<w>.txt` and `screens/working/<w>.txt` at every width.
-- macOS arm64 captures (the kit is Linux-only so far) and the Keychain versus
-  file credential behaviour.
+- On macOS: hooks, session resume and fork, the stub screens, and the Keychain
+  credential backend.
 - A real model turn, real approval variants beyond the single-stage shell
   command (`Always allow in this workspace`), `Notification` for approvals,
   `PostToolUseFailure`, compaction hooks, `StopFailure`, `Interrupt`.

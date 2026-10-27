@@ -1,6 +1,5 @@
 .config
 .config/muse
-.config/muse/.auth.json.lock
 .local/share
 .local/share/muse
 .local/share/muse/local-tracing
