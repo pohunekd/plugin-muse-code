@@ -1,0 +1,22 @@
+launcher: muse (bash script, 32737 bytes)
+version file: .muse-version = 1.4.14-R7309.1
+binary: muse-bin-1.4.14-R7309.1 (423687488 bytes)
+binary sha256: 1c96114408acbeade9a8fb79e3b4425e5b64d50425938568aef01bdc04ce2e03
+launcher sha256: c6db294799a190ca380da274beb3b9c0e160e0da9681a3d364ce8b0e5fa3a4bc
+
+release info (.muse-release-info.json):
+{
+  "channel": "muse-stable",
+  "version": "1.4.14-R7309.1",
+  "manifest_url": "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=manifest.json",
+  "urgency": "none",
+  "notification_text": "",
+  "state": "public",
+  "min_version": null
+}
+
+install directory listing:
+.muse-release-info.json
+.muse-version
+muse
+muse-bin-1.4.14-R7309.1

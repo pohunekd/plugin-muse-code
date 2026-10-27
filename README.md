@@ -29,6 +29,7 @@ Handlers, reporters and parsers stay in the core repository
 | `compat/screens/<scenario>/<width>.txt` | Terminal screens at widths 20 to 200: trust, login, api-key, idle, working, done, approval, question, update-notice, clear, fork, resume, seed |
 | `compat/osc7501/` | OSC 7501 program-status records per scenario, terminal titles, the startup queries |
 | `compat/hooks/<scenario>/` | One JSON file per hook call: event, stdin payload, environment names, the `MUSE_*`/`TBH_*` values |
+| `compat/macos-arm64/` | The same layout for macOS arm64: install, help, and the login, api-key, trust, idle, working, done and update-notice screens, OSC 7501 records and titles |
 | `compat/sessions/` | Session store tree and the first records of a session (strings over 80 characters become `<N chars>`; host fields such as pids and free disk space are dropped) |
 
 ## No credentials, no real model
@@ -63,6 +64,8 @@ streams. Run it on a disposable host or VM; never point it at a real HOME.
 Paths below `--root` are replaced in the evidence by a placeholder of the same
 width, so the layout of narrow screens is preserved.
 
+On macOS the kit runs the screen and OSC steps (`install version login trust turn update-notice`) under a `sandbox-exec` profile that denies all network access except loopback and unix sockets, with GNU sed, find, stat and date on the PATH (for example from nix) and `--out compat/macos-arm64`. The credential backend is forced to a file so the Keychain stays untouched.
+
 A new Muse release is captured by re-running the kit before the lock moves:
 `supported.below` stays at the next minor until the new captures pass.
 
@@ -95,6 +98,19 @@ unverified.
 | Resume and fork | `muse resume <id>` works for a root session and for a fork; `/fork` prints the fork id and `muse resume <id>`; `/clear` starts a new session and prints the old id |
 | Prompt seed | `muse "<prompt>"` submits the prompt as the first turn |
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
+
+### macOS arm64
+
+Captured on a macOS 15 arm64 host in a throwaway HOME under the sandbox profile above; evidence in `compat/macos-arm64/`.
+
+| Area | Result |
+|---|---|
+| Release | Same release `1.4.14-R7309.1` and the same launcher (sha256 equal); the binary is a 423,687,488-byte Mach-O build |
+| OSC 7501 | Identical to Linux: probe `ESC ] 7501 ; ? ESC \` at startup, records only after it is answered, `app=muse`, states `idle`, `working`, `done`; terminal title is the directory name with a braille spinner while working |
+| Screens | Trust, login, api-key (not at width 20), working and done screens match Linux. The idle composer has an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame carries no SSH-projection notice |
+| Launcher notice | `Muse Code updated A -> B` as on Linux |
+
+Not captured on macOS: hooks, sessions, the stub screens (no `socat`), the pane process (`ps` is refused inside the sandbox), and the Keychain behaviour (the file backend was forced). These stay unverified there.
 
 ### Unverified
 
