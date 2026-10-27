@@ -87,7 +87,8 @@ require_tools() {
   local tool missing=0
   local tools=(tmux curl sed awk perl jq sha256sum git ps stat mkfifo find grep)
   if [[ "$PLATFORM" == Darwin ]]; then
-    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc)
+    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc security)
+    ((BASH_VERSINFO[0] >= 4)) || { log "bash 4 or later must come first on the PATH"; missing=1; }
     # The kit relies on GNU sed, stat, find and date.
     for tool in sed stat find date; do
       if ! { command -v "$tool" >/dev/null 2>&1 && "$tool" --version 2>&1 | grep -q GNU; }; then
@@ -113,13 +114,13 @@ require_tools() {
 
 # sandbox_profile: macOS sandbox profile. It denies all network access, allows
 # unix sockets only below the capture root (tmux), and denies the mach services
-# that resolve names or reach the Keychain.
+# that resolve names, reach the Keychain or open a URL in the user's browser.
 sandbox_profile() {
   [[ "$ROOT" != *[\"\\]* ]] || die "--root must not contain quotes or backslashes"
   printf '%s' '(version 1)(allow default)(deny network*)'
   printf '(allow network-bind (local unix-socket (subpath "%s")))' "$ROOT"
   printf '(allow network-outbound (remote unix-socket (subpath "%s")))' "$ROOT"
-  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|SecurityServer|secd|securityd|security[.])"))'
+  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|SecurityServer|secd|securityd|security[.]|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
 }
 
 # --- paths -----------------------------------------------------------------
@@ -372,8 +373,11 @@ credential_record() {
   local f
   f="$(find "$1/sessions" -name session.jsonl 2>/dev/null | sort | head -n 1)"
   [[ -n "$f" ]] || die "no session record under ${1#"$ROOT"/}"
-  jq -c 'select(.payload_type == "session.opened.observed")
-    | .payload.record | {credential_backend, keychain_fallback_reason}' "$f" | head -n 1
+  jq -ce 'select(.payload_type == "session.opened.observed")
+    | .payload.record | {credential_backend, keychain_fallback_reason}
+    | select(.credential_backend == "file")' "$f" | head -n 1 | grep . ||
+    die "the session did not report the file credential backend"
+
 }
 
 # Writes the default-HOME layout evidence: where an unauthenticated start puts
@@ -524,7 +528,7 @@ step_update_notice() {
   prepare_scn update-notice
   printf '1.4.0-R1\t%s\n' "$(cat "$b/.muse-version")" >"$notice"
   pty_start update-notice 120 "$(scn_dir update-notice)/ws" --provider echo --trust-workspace
-  pty_wait 'Muse Code updated|❯' || true
+  pty_wait '❯' || true
   visible <"$RAW_FILE" | head -c 600 | emit "$OUT/screens/update-notice/raw-head.txt"
   pty_snap "$OUT/screens/update-notice/120.txt"
   pty_stop
@@ -828,10 +832,43 @@ dry_run() {
   wrapped="$(printf '%s\n  %s' "${ROOT:0:cut}" "${ROOT:cut}" | redact | tr -d ' \n')"
   [[ "$wrapped" != *"${ROOT:0:cut}"* && "$wrapped" != *"${ROOT:cut}"* ]] ||
     die "redaction left a wrapped root in place"
+  # The alias without the /private prefix is redacted too.
+  sample="$(printf '%s/x' "${ROOT#/private}" | redact)"
+  [[ "$sample" != *"${ROOT#/private}"* ]] || die "redaction left the root alias in place"
   bash -n "$SCRIPT_DIR/capture"
   bash -n "$SCRIPT_DIR/hook-log"
   bash -n "$SCRIPT_DIR/model-stub"
   printf 'dry run ok\n'
+}
+
+# darwin_run_sandboxed <steps...>: records what works outside the sandbox
+# (name resolution, a loopback connection, a Keychain lookup) so the inside
+# checks mean something, then runs the steps under the profile.
+darwin_run_sandboxed() {
+  local resolves="" loop="" keychain=0 port=18091 pid rc=0 ids
+  dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address' && resolves=resolves
+  nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  sleep 1
+  nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && loop=connects
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  security find-generic-password -s capture-probe-absent >/dev/null 2>&1 || keychain=$?
+  ids="$(darwin_identity_values)"
+  nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  sleep 1
+  mkdir -p "$ROOT/tmux"
+  TMUX_TMPDIR="$ROOT/tmux" CAPTURE_DNS_CONTROL="$resolves" CAPTURE_LOOP_CONTROL="$loop" \
+    CAPTURE_LOOP_PORT="$port" CAPTURE_KEYCHAIN_CONTROL="$keychain" CAPTURE_IN_NETNS=1 \
+    CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+    CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
+    CAPTURE_HOST_IDS="$ids" \
+    sandbox-exec -p "$(sandbox_profile)" \
+    "$BASH" "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "$@" || rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return "$rc"
 }
 
 main() {
@@ -885,7 +922,7 @@ main() {
   # CLI runs under the caller's uid in a nested user namespace.
   if [[ "$PLATFORM" == Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
     # No namespaces on macOS: the steps run under a sandbox profile that denies
-    # all network access except loopback.
+    # all network access, including loopback.
     local mrest=()
     for arg in "${steps[@]}"; do
       if [[ "$arg" == install ]]; then
@@ -895,15 +932,10 @@ main() {
       fi
     done
     ((${#mrest[@]} > 0)) || exit 0
-    local control=""
-    dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address' && control=resolves
-    mkdir -p "$ROOT/tmux"
-    TMUX_TMPDIR="$ROOT/tmux" CAPTURE_DNS_CONTROL="$control" CAPTURE_IN_NETNS=1 \
-      CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
-      CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
-      CAPTURE_HOST_IDS="$(darwin_identity_values)" \
-      exec sandbox-exec -p "$(sandbox_profile)" \
-      bash "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "${mrest[@]}"
+    # tmux sockets live below the root; a unix socket path holds 104 bytes.
+    ((${#ROOT} <= 60)) || die "--root is too long for tmux socket paths (60 characters at most)"
+    darwin_run_sandboxed "${mrest[@]}"
+    exit $?
   fi
   if [[ "$PLATFORM" != Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
     local rest=()
@@ -960,23 +992,23 @@ main() {
 # assert_isolated: only a loopback interface exists and no host path is mapped.
 assert_isolated() {
   if [[ "$PLATFORM" == Darwin ]]; then
-    # Name resolution is proven dead by comparing with the unsandboxed control
-    # taken before the sandbox started; the probes use a documentation address
-    # and a neutral name, never the vendor.
-    [[ "${CAPTURE_DNS_CONTROL:-}" == resolves ]] ||
-      die "no name-resolution control from the unsandboxed side"
+    # Each probe is compared with the unsandboxed control taken before the
+    # sandbox started, so a probe that fails everywhere proves nothing.
+    [[ "${CAPTURE_DNS_CONTROL:-}" == resolves && "${CAPTURE_LOOP_CONTROL:-}" == connects ]] ||
+      die "no unsandboxed control for the isolation probes"
     if dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address'; then
       die "names resolve inside the sandbox"
     fi
-    if curl -sS --max-time 5 -o /dev/null http://example.com 2>/dev/null; then
-      die "network is reachable inside the sandbox"
+    if nc -z -w 2 127.0.0.1 "${CAPTURE_LOOP_PORT:?}" >/dev/null 2>&1; then
+      die "a loopback connection works inside the sandbox"
     fi
-    if curl -sS --max-time 5 -o /dev/null http://192.0.2.1 2>/dev/null; then
-      die "network is reachable inside the sandbox"
-    fi
-    if nc -U /var/run/mDNSResponder </dev/null >/dev/null 2>&1; then
+    if nc -z -w 2 -U /var/run/mDNSResponder >/dev/null 2>&1; then
       die "the resolver socket is reachable inside the sandbox"
     fi
+    local keychain=0
+    security find-generic-password -s capture-probe-absent >/dev/null 2>&1 || keychain=$?
+    [[ "$keychain" != "${CAPTURE_KEYCHAIN_CONTROL:-}" ]] ||
+      die "the Keychain answers inside the sandbox"
     return 0
   fi
   local links
@@ -989,13 +1021,21 @@ assert_isolated() {
 # darwin_identity_values: the names and ids macOS exposes to the CLI, one per
 # line, read at run time so no value is written into the repository.
 darwin_identity_values() {
+  local ioreg_out name
+  ioreg_out="$(ioreg -rd1 -c IOPlatformExpertDevice)"
   {
     hostname -s
     scutil --get ComputerName
     scutil --get LocalHostName
-    dscl . -read "/Users/$(id -un)" RealName 2>/dev/null | sed -e '1d' -e 's/^ *//'
-    ioreg -rd1 -c IOPlatformExpertDevice | awk -F'"' '/IOPlatformSerialNumber|IOPlatformUUID/ { print $4 }'
-  } 2>/dev/null | awk 'length($0) >= 3'
+    /usr/bin/id -F
+    awk -F'"' '/IOPlatformSerialNumber|IOPlatformUUID/ { print $4 }' <<<"$ioreg_out"
+  } | awk 'length($0) >= 3' >"$ROOT/.identity.$$"
+  # The short host name, the two scutil names, the serial and the UUID must all
+  # be present, or the scan would silently skip them.
+  [[ "$(wc -l <"$ROOT/.identity.$$")" -ge 5 ]] || { rm -f "$ROOT/.identity.$$"; die "could not read the host identity values"; }
+  name="$(cat "$ROOT/.identity.$$")"
+  rm -f "$ROOT/.identity.$$"
+  printf '%s\n' "$name"
 }
 
 # scan_evidence <dir>: fails when a host-specific string appears in the staged
