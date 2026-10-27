@@ -30,18 +30,18 @@ There is no Meta API key for this project and none will be created.
 The kit never logs in, never stores a credential and never calls a real model:
 
 - Model-free turns use Muse's own `--provider echo`.
+- Every step except `install` runs in a network namespace that has only a
+  loopback interface, so no capture can reach Meta.
 - Approval and question screens use `scripts/model-stub`, a loopback endpoint
-  reached through `--base-url`. The step runs in a network namespace that has
-  only a loopback interface, so nothing can reach a real endpoint. The CLI gets a
-  placeholder `META_API_KEY` for that run only; no credential file is written.
+  reached through `--base-url`. The CLI gets a placeholder `META_API_KEY` for
+  that run only; the kit fails if any credential file appears.
 - The browser sign-in entry of the login screen is never selected: Enter on it
   starts a device-code request at Meta.
 
 ## Running the kit
 
-Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, od; the `stub` step also
-needs socat and unprivileged user namespaces (`unshare --user --map-root-user
---net`).
+Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, git, ps, socat, ip and
+unprivileged user namespaces (`unshare --user --map-root-user --net`).
 
 ```bash
 scripts/capture --root /path/to/scratch --dry-run all   # plan and tool check; no network

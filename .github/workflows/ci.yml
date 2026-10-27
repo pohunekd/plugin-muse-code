@@ -23,9 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Tools
-        run: sudo apt-get install --yes --no-install-recommends tmux jq shellcheck
+        run: sudo apt-get install --yes --no-install-recommends tmux jq shellcheck socat
       - name: shellcheck
-        run: shellcheck scripts/capture scripts/hook-log
+        run: shellcheck scripts/capture scripts/hook-log scripts/model-stub
       - name: capture dry run
         run: scripts/capture --root "$RUNNER_TEMP/capture" --dry-run all
       - name: evidence carries no credential

@@ -6,7 +6,8 @@
 # the credential-free `--provider echo` provider. It never logs in, never
 # stores a credential and never calls a model.
 #
-# Requires: bash 4+, tmux, curl, sed, awk, jq, sha256sum. See README.md.
+# Requires: bash 4+, tmux, curl, sed, awk, jq, sha256sum, git, ps, socat, ip,
+# unshare. See README.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -73,7 +74,7 @@ log() {
 
 require_tools() {
   local tool missing=0
-  for tool in tmux curl sed awk jq sha256sum od; do
+  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       log "missing tool: $tool"
       missing=1
@@ -97,7 +98,9 @@ redact() {
   ((${#ROOT} >= 13)) || die "--root must be at least 13 characters long"
   pad="$(printf '%*s' $((${#ROOT} - 13)) '' | tr ' ' '_')"
   repl="/capture-root${pad}"
-  sed -e "s|${ROOT}|${repl}|g"
+  local esc
+  esc="$(printf '%s' "$ROOT" | sed -e 's/[][\\.*^$|&]/\\&/g')"
+  sed -e "s|${esc}|${repl}|g"
 }
 
 # Writes stdin to $1, redacted, creating the directory.
@@ -120,8 +123,7 @@ prepare_scn() {
   shift
   s="$(scn_dir "$name")"
   # A CLI that was just stopped may still be writing into its data root.
-  local attempt
-  for attempt in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     rm -rf "$s" && break
     sleep 1
   done
@@ -146,7 +148,8 @@ prepare_scn() {
 TMUX_SOCKET=""
 RAW_FILE=""
 
-tm() { tmux -L "$TMUX_SOCKET" "$@"; }
+# The operator's tmux configuration must not change the captured screens.
+tm() { tmux -L "$TMUX_SOCKET" -f /dev/null "$@"; }
 
 # pty_start <scn> <width> <cwd> <muse args...>: starts the CLI in a detached
 # terminal. The raw output stream is recorded from the first byte.
@@ -211,9 +214,9 @@ pty_type() { tm send-keys -t 0 -l "$1"; }
 # sent meanwhile is dropped, so the Enter is repeated until the expected text
 # shows.
 pty_submit() {
-  local text="$1" expect="$2" tries
+  local text="$1" expect="$2"
   pty_type "$text"
-  for tries in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5; do
     sleep "$TYPE_PAUSE"
     pty_keys Enter
     if pty_wait "$expect" 8; then
@@ -234,12 +237,20 @@ pty_snap() {
 
 # osc_records <raw>: OSC 7501 report records in stream order.
 osc_records() {
-  LC_ALL=C grep -a -o $'\x1b\\]7501;[^\x07\x1b]*' "$1" | visible
+  LC_ALL=C grep -a -o $'\x1b\\]7501;[^\x07\x1b]*\\(\x07\\|\x1b\\\\\\)' "$1" | visible
 }
 
 # osc_titles <raw>: terminal title sequences, consecutive duplicates removed.
 osc_titles() {
   LC_ALL=C grep -a -o $'\x1b\\]0;[^\x07]*' "$1" | visible | uniq
+}
+
+# no_credential_files: fails when any scenario or the throwaway HOME holds a
+# credential file.
+no_credential_files() {
+  local found
+  found="$(find "$ROOT/s" "$(home_dir)" \( -name 'auth.json' -o -name 'credentials*' \) 2>/dev/null | head -n 1)"
+  [[ -z "$found" ]] || die "credential file found: ${found#"$ROOT"/}"
 }
 
 # --- steps -------------------------------------------------------------------
@@ -253,7 +264,7 @@ step_install() {
   fi
   installer="$dl/install.sh"
   curl -fsSL "$INSTALLER_URL" -o "$installer"
-  # The installer is read by the operator before it runs; this only records it.
+  # The installer runs unpinned; its hash and output are recorded as provenance.
   sha256sum "$installer" | emit "$OUT/install/installer.sha256"
   env -i HOME="$(home_dir)" PATH=/usr/bin:/bin MUSE_NO_MODIFY_PATH=1 \
     MUSE_NO_AUTO_UPDATE=1 SHELL=/bin/bash bash "$installer" >"$dl/install.out" 2>&1
@@ -276,11 +287,10 @@ step_version() {
     printf 'binary: muse-bin-%s (%s bytes)\n' "$version" "$(stat -c %s "$b/muse-bin-$version")"
     printf 'binary sha256: %s\n' "$(sha256sum "$b/muse-bin-$version" | awk '{print $1}')"
     printf 'launcher sha256: %s\n' "$(sha256sum "$b/muse" | awk '{print $1}')"
-    printf 'file type: %s\n' "$(file -b "$b/muse-bin-$version" 2>/dev/null | cut -d, -f1-4 || true)"
     printf '\nrelease info (.muse-release-info.json):\n'
     jq . "$b/.muse-release-info.json"
     printf '\ninstall directory listing:\n'
-    (cd "$b" && ls -A | sort)
+    find "$b" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
   } | emit "$OUT/install/layout.txt"
   "$h" --help 2>&1 | emit "$OUT/help/muse.txt"
   for c in resume exec auth login logout usage serve sandbox init config plugins \
@@ -327,17 +337,20 @@ step_login() {
     pty_start login "$w" "$(scn_dir login)/ws" --trust-workspace
     if pty_wait 'Log in with browser|Set an API key'; then
       pty_snap "$OUT/screens/login/$w.txt"
+      # Enter only after the selection sits on the API-key entry; Enter on
+      # the browser entry would start a device-code request.
+      sleep "$SETTLE"
       pty_keys Down
-      pty_keys Enter
-      if pty_wait 'Paste your Model API key|API key'; then
-        pty_snap "$OUT/screens/api-key/$w.txt"
+      if pty_wait 'Set an API key +· Enter to choose' 5; then
+        pty_keys Enter
+        if pty_wait 'Paste your Model API key' 10; then
+          pty_snap "$OUT/screens/api-key/$w.txt"
+        fi
       fi
     fi
     pty_stop
   done
-  if [[ -e "$(scn_dir login)/config/muse/auth.json" ]]; then
-    die "an auth file appeared; the login scenario must never store credentials"
-  fi
+  no_credential_files
 }
 
 step_trust() {
@@ -380,6 +393,8 @@ turn_at() {
   if pty_wait 'echo: hello'; then
     snap_if "$OUT/screens/done/$w.txt"
   fi
+  # The done record follows the reply.
+  sleep 2
 }
 
 step_turn() {
@@ -450,7 +465,9 @@ collect_hooks() {
     event="$(basename "$f" .json)"
     event="${event#*-}"
     n=$((n + 1))
-    redact <"$f" >"$(printf '%s/%03d-%s.json' "$dest" "$n" "$event")"
+    # Strings are cut so Muse's internal prompts are not republished.
+    jq -c 'walk(if type == "string" and length > 200 then .[0:200] + "..." else . end)' "$f" |
+      redact >"$(printf '%s/%03d-%s.json' "$dest" "$n" "$event")"
   done
 }
 
@@ -541,7 +558,7 @@ step_sessions() {
   pty_keys Enter
   pty_wait 'Fork created' 15 || true
   pty_snap "$OUT/screens/fork/120.txt"
-  fork_sid="$(pty_screen | grep -Eo 'muse resume [0-9a-f-]{36}' | head -n 1 | awk '{print $3}')"
+  fork_sid="$(pty_screen | grep -Eo 'muse resume [0-9a-f-]{36}' | head -n 1 | awk '{print $3}' || true)"
   pty_quit
   pty_stop
 
@@ -593,16 +610,8 @@ step_sessions() {
 }
 
 # The loopback model stub: a socat listener runs scripts/model-stub per
-# connection inside a network namespace that has only a loopback interface, so
-# nothing can reach a real endpoint. Re-executes itself into that namespace.
+# connection; the step runs inside the loopback-only namespace set up by main.
 step_stub() {
-  if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
-    command -v unshare >/dev/null 2>&1 || die "stub step needs unshare (util-linux)"
-    command -v socat >/dev/null 2>&1 || die "stub step needs socat"
-    CAPTURE_IN_NETNS=1 exec unshare --user --map-root-user --net \
-      bash "$SCRIPT_DIR/capture" --root "$ROOT" stub
-  fi
-  ip link set lo up
   local port=18081 state="$ROOT/stub-state" listener w s ws snap_name
   mkdir -p "$state"
   STUB_STATE="$state" STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK \
@@ -715,6 +724,7 @@ dry_run() {
   [[ "$sample" != *"$ROOT"* ]] || die "redaction left the root in place"
   bash -n "$SCRIPT_DIR/capture"
   bash -n "$SCRIPT_DIR/hook-log"
+  bash -n "$SCRIPT_DIR/model-stub"
   printf 'dry run ok\n'
 }
 
@@ -743,17 +753,33 @@ main() {
     usage >&2
     exit 2
   }
-  ROOT="$(mkdir -p "$ROOT" && cd "$ROOT" && pwd)"
+  ROOT="$(mkdir -p "$ROOT" && cd "$ROOT" && pwd -P)"
   if ((DRY_RUN == 1)); then
     dry_run "${steps[@]}"
     exit 0
   fi
   require_tools
   mkdir -p "$OUT"
+  # Every step except install runs in a network namespace that has only a
+  # loopback interface, so no capture can reach Meta.
+  if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
+    local rest=()
+    for arg in "${steps[@]}"; do
+      if [[ "$arg" == install ]]; then
+        step_install
+      else
+        rest+=("$arg")
+      fi
+    done
+    ((${#rest[@]} > 0)) || exit 0
+    CAPTURE_IN_NETNS=1 exec unshare --user --map-root-user --net \
+      bash "$SCRIPT_DIR/capture" --root "$ROOT" "${rest[@]}"
+  fi
+  ip link set lo up
   for arg in "${steps[@]}"; do
     log "step: $arg"
     case "$arg" in
-      install) step_install ;;
+      install) ;;
       version)
         step_version
         step_home_layout
@@ -764,7 +790,10 @@ main() {
       update-notice) step_update_notice ;;
       hooks) step_hooks ;;
       sessions) step_sessions ;;
-      stub) step_stub ;;
+      stub)
+        step_stub
+        no_credential_files
+        ;;
       *) die "unknown step: $arg" ;;
     esac
   done

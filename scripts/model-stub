@@ -41,6 +41,7 @@ while IFS= read -r header; do
   esac
 done
 length="${length//[[:space:]]/}"
+[[ "$length" =~ ^[0-9]+$ ]] || length=0
 body=""
 if ((length > 0)); then
   body="$(head -c "$length")"
