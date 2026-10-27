@@ -1,0 +1,19 @@
+
+  Muse Code 1.4.14
+
+❯ please STUB_TOOL
+
+◈ Calling tools (13s · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+Would you like to run the following command?
+
+  $ echo capture > capture-artifact.txt
+  Stage 1/1
+  Current argv: ["echo","capture"]
+
+⟩ 1. Allow this stage once (y)
+  2. Abort the entire command (esc)
+Change approval defaults in /permissions
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  stub-model · high · /capture-root____/s/stub/ws · Auto-review

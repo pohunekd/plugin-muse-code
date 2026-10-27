@@ -1,0 +1,20 @@
+Do you trust this
+workspace?
+Workspace:
+/capture-root____/s/
+trust/ws
+
+Trusting allows
+project-local
+skills, rules,
+hooks, and plugin
+config to load
+before the model
+runs.
+Only trust this
+workspace when you
+trust its contents.
+⟩ 1  Trust and conti
+  2  Quit
+
+Use Up/Down or 1/2,

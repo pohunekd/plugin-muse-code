@@ -1,0 +1,19 @@
+usage: muse skills list [--source all|user|project|built-in|plugin] [--enabled-only] [--workspace <path>] [--trust-workspace] [--json]
+
+usage: muse skills inspect <skill-id-or-path> [--source all|user|project|built-in|plugin] [--workspace <path>] [--trust-workspace] [--json]
+
+usage: muse skills enable <skill-id-or-path> --scope user|project|built-in|plugin [--workspace <path>] [--trust-workspace] [--json]
+
+usage: muse skills user-only <skill-id-or-path> --scope user|project|built-in|plugin [--workspace <path>] [--trust-workspace] [--json]
+
+usage: muse skills disable <skill-id-or-path> --scope user|project|built-in|plugin [--workspace <path>] [--trust-workspace] [--json]
+
+usage: muse skills validate <path> [--json]
+
+usage: muse skills install <path> [--scope user] [--name NAME] [--force] [--json]
+
+usage: muse skills import --from claude|codex [--scope user] [--dry-run] [--force] [--json]
+
+usage: muse skills update <skill-id> [--json]
+
+usage: muse skills uninstall <skill-id> [--keep-files] [--json]

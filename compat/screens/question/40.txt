@@ -1,0 +1,25 @@
+
+  Muse Code 1.4.14
+
+❯ please STUB_ASK
+
+◆ Request user input Sco… — running (0s)
+
+  Which scope should the change cover?
+
+  ⟩ 1. Small              Touch one
+                          file.
+    2. Large              Touch the
+                          whole module.
+    3. None of the above  Optionally,
+                          add details in
+                          notes (tab).
+
+  Enter to select · ↑/↓ to move · Tab
+  for an optional note · Esc to
+  interrupt
+
+────────────────────────────────────────
+❯
+────────────────────────────────────────
+  stub-model · high · …/ws · Auto-review

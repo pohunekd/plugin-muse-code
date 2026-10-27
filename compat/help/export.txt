@@ -1,0 +1,38 @@
+usage: muse export [--session <id|path>] [--last] [--out <file>] [--redacted]
+
+Exports one session's durable log as a single self-contained JSON document
+(export_schema_version 1): timestamps, messages, verbatim encrypted
+reasoning, tool calls/results, approvals, question outcomes, model ids,
+ses_/trajectory_ ids, and fork/subagent lineage.
+
+Without --out, the document is written to trajectory-<timestamp>.json in
+the current directory (falling back to the temp dir when the cwd is not
+writable; an existing file is never overwritten — the name is uniquified)
+and stdout carries exactly one line: the absolute path written.
+
+With no --session on an interactive terminal, export opens the SAME session
+picker `muse resume` uses so you can see and choose which session to export
+(#10408) — unless --out is given (a file destination exports the most
+recent session, never the picker). A piped/redirected export stays
+non-interactive and exports the most recent session; pass --last to be
+explicit or to skip the picker interactively.
+
+Options:
+  --session <id|path>  Session UUID (resolved in the local session store) or
+                       a path to a session.jsonl file. An existing file path
+                       wins over an id parse. Bypasses the picker.
+  --last               Skip the picker and export the most recent retained
+                       session for the current workspace. Also the default
+                       when the terminal is non-interactive.
+  --out <file>         Write the document to <file> instead of the default
+                       timestamped file. An existing file is replaced on
+                       success (staged + renamed, so a failed export leaves
+                       the previous file intact). Like --last, this
+                       skips the picker (most recent session).
+  --redacted           Share-safe variant: payload strings pass through the
+                       telemetry redaction rules. Default output is RAW —
+                       the export is a local file you already own. Encrypted
+                       reasoning blobs stay verbatim in both modes.
+
+Offline: reads only local files; no network access. Schema and details:
+docs/session-export.md

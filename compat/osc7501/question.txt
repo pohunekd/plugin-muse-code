@@ -1,0 +1,5 @@
+# question picker; records in stream order
+<ESC>]7501;?<ESC>\
+<ESC>]7501;state=idle:app=muse<ESC>\
+<ESC>]7501;state=working:app=muse<ESC>\
+<ESC>]7501;state=blocked:kind=question:app=muse<ESC>\

@@ -1,0 +1,17 @@
+
+  Muse Code 1.4.14
+
+❯ please STUB_TOOL
+
+◆ Ran echo capture > capture-artifact.txt — denied
+  └ approval aborted
+    The user rejected this action. Don't retry it unless they ask.
+
+◆ stub reply
+
+◆ Double checking (17s · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  stub-model · high · /capture-root____/s/stub/ws · Auto-review
