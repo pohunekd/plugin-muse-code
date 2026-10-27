@@ -438,8 +438,10 @@ turn_at() {
   if [[ "$w" == 120 && "$snap" == snap ]]; then
     # The launcher execs the versioned binary, so the pane process is the
     # binary itself.
-    ps -o comm=,args= -p "$(tm display-message -p -t 0 '#{pane_pid}')" |
+    # macOS refuses ps inside the sandbox profile; the file is then absent.
+    { ps -o comm=,args= -p "$(tm display-message -p -t 0 '#{pane_pid}')" 2>/dev/null || true; } |
       emit "$OUT/install/process.txt"
+    [[ -s "$OUT/install/process.txt" ]] || rm -f "$OUT/install/process.txt"
   fi
   # With the reply delayed, the first visible result of a submit is the
   # working state.
