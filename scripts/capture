@@ -40,6 +40,11 @@ HOOK_EVENTS=(SessionStart UserPromptSubmit PreToolUse PermissionRequest PostTool
 # Events whose hooks must declare async: true or Muse skips them.
 HOOK_ASYNC_EVENTS="Interrupt ToolUseStart"
 
+# jq filters: strings over 80 characters become a length marker; host-specific
+# fields (free disk space, pids) are dropped.
+LONG_STRING_FILTER='walk(if type == "string" and length > 80 then "<" + (length | tostring) + " chars>" else . end)'
+HOST_FIELD_FILTER='walk(if type == "object" then with_entries(select(.key | test("free_bytes|^pid$|_pid$") | not)) else . end)'
+
 STEPS_ALL=(install version login trust turn update-notice hooks sessions stub)
 
 usage() {
@@ -47,7 +52,7 @@ usage() {
 usage: scripts/capture [--dry-run] [--root DIR] <step>...
 
 steps:
-  install        install the CLI into <root>/home with the official installer
+  install        install the CLI into <root>/fakehome with the official installer
   version        --version, --help of every command, install layout, binary sha256
   login          login and API-key prompt screens (never submits anything)
   trust          workspace trust dialog screens
@@ -85,8 +90,8 @@ require_tools() {
 
 # --- paths -----------------------------------------------------------------
 
-home_dir() { printf '%s/home\n' "$ROOT"; }
-bin_dir() { printf '%s/home/.local/bin\n' "$ROOT"; }
+home_dir() { printf '%s/fakehome\n' "$ROOT"; }
+bin_dir() { printf '%s/fakehome/.local/bin\n' "$ROOT"; }
 scn_dir() { printf '%s/s/%s\n' "$ROOT" "$1"; }
 
 # --- redaction -------------------------------------------------------------
@@ -258,17 +263,17 @@ no_credential_files() {
 step_install() {
   local dl="$ROOT/dl" installer
   mkdir -p "$dl" "$(home_dir)"
-  if [[ -x "$(bin_dir)/muse" && -f "$(bin_dir)/.muse-version" ]]; then
+  installer="$dl/install.sh"
+  if [[ -x "$(bin_dir)/muse" && -f "$(bin_dir)/.muse-version" && -f "$installer" ]]; then
     log "already installed: $(cat "$(bin_dir)/.muse-version")"
+    sha256sum "$installer" >"$dl/installer.sha256"
     return 0
   fi
-  installer="$dl/install.sh"
   curl -fsSL "$INSTALLER_URL" -o "$installer"
   # The installer runs unpinned; its hash and output are recorded as provenance.
-  sha256sum "$installer" | emit "$OUT/install/installer.sha256"
+  sha256sum "$installer" >"$dl/installer.sha256"
   env -i HOME="$(home_dir)" PATH=/usr/bin:/bin MUSE_NO_MODIFY_PATH=1 \
     MUSE_NO_AUTO_UPDATE=1 SHELL=/bin/bash bash "$installer" >"$dl/install.out" 2>&1
-  redact <"$dl/install.out" >"$OUT/install/installer-output.txt"
 }
 
 step_version() {
@@ -278,6 +283,11 @@ step_version() {
   prepare_scn version
   h="$(scn_dir version)/run"
   mkdir -p "$OUT/install" "$OUT/help"
+  [[ -f "$ROOT/dl/installer.sha256" && -f "$ROOT/dl/install.out" ]] ||
+    die "installer provenance missing; run the install step"
+  awk '{print $1}' "$ROOT/dl/installer.sha256" | emit "$OUT/install/installer.sha256"
+  # The installer ran on the host, outside the bound root.
+  sed -e "s|${CAPTURE_HOST_ROOT:?}|${ROOT}|g" "$ROOT/dl/install.out" | emit "$OUT/install/installer-output.txt"
   "$h" --version 2>&1 | emit "$OUT/install/version.txt"
   version="$(cat "$b/.muse-version")"
   printf '%s\n' "$version" >"$OUT/RELEASE"
@@ -293,8 +303,8 @@ step_version() {
     find "$b" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
   } | emit "$OUT/install/layout.txt"
   "$h" --help 2>&1 | emit "$OUT/help/muse.txt"
-  for c in resume exec auth login logout usage serve sandbox init config plugins \
-    session-message skills export trace; do
+  for c in resume exec usage serve sandbox init config plugins session-message \
+    skills export trace; do
     "$h" "$c" --help 2>&1 | emit "$OUT/help/$c.txt" || true
   done
 }
@@ -304,15 +314,15 @@ step_version() {
 step_home_layout() {
   local ws="$ROOT/s/home-layout/ws"
   rm -rf "$ROOT/s/home-layout"
-  mkdir -p "$ws" "$ROOT/home-default"
+  mkdir -p "$ws" "$ROOT/fakehome-default"
   git -C "$ws" init -q .
-  cp -a --reflink=auto "$(home_dir)/." "$ROOT/home-default/" 2>/dev/null || true
-  rm -rf "$ROOT/home-default/.config" "$ROOT/home-default/.local/share"
+  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
+  rm -rf "$ROOT/fakehome-default/.config" "$ROOT/fakehome-default/.local/share"
   local run="$ROOT/s/home-layout/run"
   {
     printf '#!/bin/bash\n'
     printf 'exec env -i HOME=%q PATH=/usr/bin:/bin TERM=xterm-256color MUSE_NO_AUTO_UPDATE=1 %q "$@"\n' \
-      "$ROOT/home-default" "$ROOT/home-default/.local/bin/muse"
+      "$ROOT/fakehome-default" "$ROOT/fakehome-default/.local/bin/muse"
   } >"$run"
   chmod +x "$run"
   TMUX_SOCKET="muse-capture-$$"
@@ -323,7 +333,7 @@ step_home_layout() {
   pty_idle || true
   pty_submit 'hello' 'echo: hello' || true
   pty_stop
-  (cd "$ROOT/home-default" && find .config .local/share -maxdepth 3 \
+  (cd "$ROOT/fakehome-default" && find .config .local/share -maxdepth 3 \
     -not -path '*/plugins/*' -not -path '*/skills/*' -not -path '*/local-tracing/*' | sort) |
     emit "$OUT/sessions/default-home-tree.txt"
 }
@@ -465,9 +475,9 @@ collect_hooks() {
     event="$(basename "$f" .json)"
     event="${event#*-}"
     n=$((n + 1))
-    # Strings are cut so Muse's internal prompts are not republished.
-    jq -c 'walk(if type == "string" and length > 200 then .[0:200] + "..." else . end)' "$f" |
-      redact >"$(printf '%s/%03d-%s.json' "$dest" "$n" "$event")"
+    # Redaction runs on the whole text first; long strings (Muse's internal
+    # prompts) are then replaced by a length marker.
+    redact <"$f" | jq -c "$LONG_STRING_FILTER" >"$(printf '%s/%03d-%s.json' "$dest" "$n" "$event")"
   done
 }
 
@@ -535,7 +545,7 @@ step_hooks() {
 # prompt text.
 session_head() {
   local f="$1" dest="$2"
-  head -n 8 "$f" | jq -c 'walk(if type == "string" and length > 80 then .[0:80] + "..." else . end)' 2>/dev/null |
+  head -n 8 "$f" | redact | jq -c "$LONG_STRING_FILTER | $HOST_FIELD_FILTER" 2>/dev/null |
     emit "$dest"
 }
 
@@ -614,6 +624,7 @@ step_sessions() {
 step_stub() {
   local port=18081 state="$ROOT/stub-state" listener w s ws snap_name
   mkdir -p "$state"
+  : >"$state/requests.log"
   STUB_STATE="$state" STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK \
     STUB_TOOL_COMMAND='echo capture > capture-artifact.txt' \
     socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$SCRIPT_DIR/model-stub" &
@@ -761,7 +772,9 @@ main() {
   require_tools
   mkdir -p "$OUT"
   # Every step except install runs in a network namespace that has only a
-  # loopback interface, so no capture can reach Meta.
+  # loopback interface, so no capture can reach Meta. Inside it the capture
+  # root is bound to a fixed path, so the CLI never sees a host path, and the
+  # CLI runs under the caller's uid in a nested user namespace.
   if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
     local rest=()
     for arg in "${steps[@]}"; do
@@ -772,12 +785,98 @@ main() {
       fi
     done
     ((${#rest[@]} > 0)) || exit 0
-    CAPTURE_IN_NETNS=1 exec unshare --user --map-root-user --net \
+    CAPTURE_IN_NETNS=1 CAPTURE_NS_STAGE=outer CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+      CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
+      CAPTURE_UID="$(id -u)" CAPTURE_GID="$(id -g)" \
+      exec unshare --user --map-root-user --net --mount --uts \
       bash "$SCRIPT_DIR/capture" --root "$ROOT" "${rest[@]}"
   fi
-  ip link set lo up
+  if [[ "${CAPTURE_NS_STAGE:-}" == outer ]]; then
+    ip link set lo up
+    hostname capture
+    mount -t tmpfs tmpfs /run
+    mkdir /run/capture-root
+    mount --bind "$ROOT" /run/capture-root
+    CAPTURE_NS_STAGE=inner exec unshare --user --map-user="$CAPTURE_UID" --map-group="$CAPTURE_GID" \
+      bash "$SCRIPT_DIR/capture" --root /run/capture-root "${steps[@]}"
+  fi
+  assert_isolated
+  local stage
   for arg in "${steps[@]}"; do
     log "step: $arg"
+    stage="$ROOT/stage/$arg"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    OUT_FINAL="$OUT"
+    OUT="$stage"
+    run_step "$arg"
+    scan_evidence "$stage"
+    OUT="$OUT_FINAL"
+    swap_step "$arg" "$stage"
+  done
+}
+
+# assert_isolated: only a loopback interface exists and no host path is mapped.
+assert_isolated() {
+  local links
+  links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
+  [[ "$links" == "lo " ]] || die "network namespace is not loopback-only: $links"
+  [[ -n "${CAPTURE_HOST_ROOT:-}" && "$ROOT" == /run/capture-root ]] ||
+    die "capture root is not bound inside the namespace"
+}
+
+# scan_evidence <dir>: fails when a host-specific string appears in the staged
+# evidence. Each file is also searched with all whitespace removed, so a value
+# that the CLI wrapped across rows is found too.
+scan_evidence() {
+  local dir="$1" needle f squashed bad=0
+  local needles=("$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$CAPTURE_HOST_USER" \
+    "$CAPTURE_HOST_HOSTNAME" "$SCRIPT_DIR" "$REPO_DIR")
+  while IFS= read -r -d '' f; do
+    squashed="$(tr -d ' \n\r\t' <"$f")"
+    for needle in "${needles[@]}"; do
+      [[ -n "$needle" ]] || continue
+      if grep -qF -- "$needle" "$f" || [[ "$squashed" == *"${needle//[[:space:]]/}"* ]]; then
+        log "host value in ${f#"$dir"/}: $needle"
+        bad=1
+      fi
+    done
+    if grep -qE '/(home|Users|root)/[A-Za-z0-9._-]+' "$f" ||
+      [[ "$squashed" =~ /(home|Users|root)/[A-Za-z0-9._-]+ ]]; then
+      log "home path in ${f#"$dir"/}"
+      bad=1
+    fi
+  done < <(find "$dir" -type f -print0)
+  ((bad == 0)) || die "host-specific data in the evidence; nothing was published"
+}
+
+# Paths under compat/ each step owns; a successful step replaces them.
+step_owned() {
+  case "$1" in
+    version) echo "install help sessions/default-home-tree.txt RELEASE" ;;
+    login) echo "screens/login screens/api-key" ;;
+    trust) echo "screens/trust" ;;
+    turn) echo "screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt" ;;
+    update-notice) echo "screens/update-notice" ;;
+    hooks) echo "hooks/project hooks/managed-env hooks/managed-nolist screens/clear" ;;
+    sessions) echo "screens/fork screens/resume screens/seed hooks/fork-session hooks/resume-root hooks/resume-fork sessions/head-1.jsonl sessions/head-2.jsonl sessions/head-3.jsonl sessions/tree.txt sessions/seed.txt sessions/runtime-1.json sessions/runtime-2.json sessions/runtime-3.json" ;;
+    stub) echo "screens/approval screens/approval-allowed screens/approval-aborted screens/question osc7501/approval-allow.txt osc7501/approval-abort.txt osc7501/question.txt hooks/stub-allow hooks/stub-abort hooks/stub-question stub" ;;
+  esac
+}
+
+# swap_step <step> <stage>: replaces the step's paths in compat/ by the staged
+# ones.
+swap_step() {
+  local step="$1" stage="$2" rel
+  for rel in $(step_owned "$step"); do
+    rm -rf "${OUT:?}/$rel"
+  done
+  cp -a "$stage/." "$OUT/"
+}
+
+run_step() {
+  local arg="$1"
+  {
     case "$arg" in
       install) ;;
       version)
@@ -796,7 +895,7 @@ main() {
         ;;
       *) die "unknown step: $arg" ;;
     esac
-  done
+  }
 }
 
 main "$@"

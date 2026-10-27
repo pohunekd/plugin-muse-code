@@ -50,7 +50,7 @@ scripts/capture --root /path/to/scratch hooks stub      # single steps
 ```
 
 `--root` receives the throwaway HOME (the CLI is installed into
-`<root>/home/.local/bin`), one XDG root per scenario and the raw terminal
+`<root>/fakehome/.local/bin`), one XDG root per scenario and the raw terminal
 streams. Run it on a disposable host or VM; never point it at a real HOME.
 Paths below `--root` are replaced in the evidence by a placeholder of the same
 width, so the layout of narrow screens is preserved.

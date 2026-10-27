@@ -28,10 +28,10 @@ jobs:
         run: shellcheck scripts/capture scripts/hook-log scripts/model-stub
       - name: capture dry run
         run: scripts/capture --root "$RUNNER_TEMP/capture" --dry-run all
-      - name: evidence carries no credential
+      - name: evidence carries no credential or home path
         # The kit never logs in; a credential-shaped string in compat/ is a bug.
         run: |
-          if grep -rEI 'META_API_KEY=[^ ]|Bearer [A-Za-z0-9._-]{20,}|"api_key"' compat; then
-            echo "credential-shaped string in compat/" >&2
+          if grep -rEI 'META_API_KEY=[^ ]|Bearer [A-Za-z0-9._-]{20,}|"api_key"|/(home|Users|root)/[A-Za-z0-9._-]+' compat; then
+            echo "credential or home path in compat/" >&2
             exit 1
           fi
