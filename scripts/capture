@@ -79,12 +79,16 @@ log() {
 
 require_tools() {
   local tool missing=0
-  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip; do
+  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip mount hostname; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       log "missing tool: $tool"
       missing=1
     fi
   done
+  if command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
+    log "unshare lacks --map-user (util-linux 2.38 or later is required)"
+    missing=1
+  fi
   ((missing == 0)) || die "install the missing tools"
 }
 
@@ -447,7 +451,7 @@ step_update_notice() {
 write_hooks_file() {
   local path="$1" logdir="$2" ev entries=()
   for ev in "${HOOK_EVENTS[@]}"; do
-    entries+=("$(jq -n --arg ev "$ev" --arg cmd "$SCRIPT_DIR/hook-log $logdir $ev" \
+    entries+=("$(jq -n --arg ev "$ev" --arg cmd "$ROOT/kit/hook-log $logdir $ev" \
       --argjson async "$([[ " $HOOK_ASYNC_EVENTS " == *" $ev "* ]] && echo true || echo false)" \
       '{($ev): [{hooks: [{type: "command", command: $cmd, timeout: 10} + (if $async then {async: true} else {} end)]}]}')")
   done
@@ -541,7 +545,8 @@ step_hooks() {
 }
 
 # session_head <session.jsonl> <dest>: the record kinds of the first records,
-# with every string value cut, so the evidence shows the envelope and not
+# with every string over 80 characters replaced by a length marker and host
+# fields dropped, so the evidence shows the envelope and not
 # prompt text.
 session_head() {
   local f="$1" dest="$2"
@@ -627,7 +632,7 @@ step_stub() {
   : >"$state/requests.log"
   STUB_STATE="$state" STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK \
     STUB_TOOL_COMMAND='echo capture > capture-artifact.txt' \
-    socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$SCRIPT_DIR/model-stub" &
+    socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$ROOT/kit/model-stub" &
   listener=$!
   # shellcheck disable=SC2064
   trap "kill $listener 2>/dev/null || true" EXIT
@@ -773,7 +778,8 @@ main() {
   mkdir -p "$OUT"
   # Every step except install runs in a network namespace that has only a
   # loopback interface, so no capture can reach Meta. Inside it the capture
-  # root is bound to a fixed path, so the CLI never sees a host path, and the
+  # root is bound to a fixed path, the hook scripts are copied into it, a
+  # synthetic passwd/group names the caller `capture`, and the
   # CLI runs under the caller's uid in a nested user namespace.
   if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
     local rest=()
@@ -797,10 +803,18 @@ main() {
     mount -t tmpfs tmpfs /run
     mkdir /run/capture-root
     mount --bind "$ROOT" /run/capture-root
+    printf 'capture:x:%s:%s:capture:/run/capture-root/fakehome:/bin/bash\n' \
+      "$CAPTURE_UID" "$CAPTURE_GID" >/run/passwd
+    printf 'capture:x:%s:\n' "$CAPTURE_GID" >/run/group
+    mount --bind /run/passwd /etc/passwd
+    mount --bind /run/group /etc/group
     CAPTURE_NS_STAGE=inner exec unshare --user --map-user="$CAPTURE_UID" --map-group="$CAPTURE_GID" \
       bash "$SCRIPT_DIR/capture" --root /run/capture-root "${steps[@]}"
   fi
   assert_isolated
+  # The hook scripts live under the bound root, so no hooks.json holds a host path.
+  mkdir -p "$ROOT/kit"
+  cp "$SCRIPT_DIR/hook-log" "$SCRIPT_DIR/model-stub" "$ROOT/kit/"
   local stage
   for arg in "${steps[@]}"; do
     log "step: $arg"
@@ -826,23 +840,44 @@ assert_isolated() {
 }
 
 # scan_evidence <dir>: fails when a host-specific string appears in the staged
-# evidence. Each file is also searched with all whitespace removed, so a value
-# that the CLI wrapped across rows is found too.
+# evidence, case-insensitively. Each file is also searched with whitespace and
+# box-drawing characters removed (a value wrapped across rows), and the host
+# path components, user and hostname are searched in truncated forms.
 scan_evidence() {
-  local dir="$1" needle f squashed bad=0
-  local needles=("$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$CAPTURE_HOST_USER" \
+  local dir="$1" needle f squashed lower bad=0 part
+  local needles=() derived=()
+  local raw=("$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$CAPTURE_HOST_USER" \
     "$CAPTURE_HOST_HOSTNAME" "$SCRIPT_DIR" "$REPO_DIR")
+  for needle in "${raw[@]}"; do
+    [[ -n "$needle" ]] && needles+=("$needle")
+  done
+  # Path components that identify the host: those with a digit or underscore.
+  for needle in "$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$SCRIPT_DIR" "$REPO_DIR"; do
+    for part in ${needle//\// }; do
+      [[ ${#part} -ge 4 && "$part" =~ [0-9_] ]] && needles+=("$part")
+    done
+  done
+  # Truncated renderings: a prefix or suffix of at least three characters next
+  # to an ellipsis.
+  for needle in "${needles[@]}"; do
+    ((${#needle} >= 5)) || continue
+    local n
+    for ((n = 3; n < ${#needle}; n++)); do
+      derived+=("${needle:0:n}…" "…${needle:${#needle}-n}")
+    done
+  done
+  needles+=("${derived[@]}")
   while IFS= read -r -d '' f; do
-    squashed="$(tr -d ' \n\r\t' <"$f")"
+    lower="$(tr '[:upper:]' '[:lower:]' <"$f")"
+    squashed="$(printf '%s' "$lower" | sed -e 's/[│┃║─ \t\r]//g' | tr -d '\n')"
     for needle in "${needles[@]}"; do
-      [[ -n "$needle" ]] || continue
-      if grep -qF -- "$needle" "$f" || [[ "$squashed" == *"${needle//[[:space:]]/}"* ]]; then
+      local ln="${needle,,}"
+      if [[ "$lower" == *"$ln"* || "$squashed" == *"${ln//[[:space:]]/}"* ]]; then
         log "host value in ${f#"$dir"/}: $needle"
         bad=1
       fi
     done
-    if grep -qE '/(home|Users|root)/[A-Za-z0-9._-]+' "$f" ||
-      [[ "$squashed" =~ /(home|Users|root)/[A-Za-z0-9._-]+ ]]; then
+    if [[ "$squashed" =~ /(home|users|root)/[a-z0-9._-]+ ]]; then
       log "home path in ${f#"$dir"/}"
       bad=1
     fi
@@ -853,10 +888,10 @@ scan_evidence() {
 # Paths under compat/ each step owns; a successful step replaces them.
 step_owned() {
   case "$1" in
-    version) echo "install help sessions/default-home-tree.txt RELEASE" ;;
+    version) echo "install/installer.sha256 install/installer-output.txt install/layout.txt install/version.txt help sessions/default-home-tree.txt RELEASE" ;;
     login) echo "screens/login screens/api-key" ;;
     trust) echo "screens/trust" ;;
-    turn) echo "screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt" ;;
+    turn) echo "install/process.txt screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt" ;;
     update-notice) echo "screens/update-notice" ;;
     hooks) echo "hooks/project hooks/managed-env hooks/managed-nolist screens/clear" ;;
     sessions) echo "screens/fork screens/resume screens/seed hooks/fork-session hooks/resume-root hooks/resume-fork sessions/head-1.jsonl sessions/head-2.jsonl sessions/head-3.jsonl sessions/tree.txt sessions/seed.txt sessions/runtime-1.json sessions/runtime-2.json sessions/runtime-3.json" ;;

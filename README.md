@@ -40,8 +40,9 @@ The kit never logs in, never stores a credential and never calls a real model:
 
 ## Running the kit
 
-Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, git, ps, socat, ip and
-unprivileged user namespaces (`unshare --user --map-root-user --net`).
+Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, git, ps, socat, ip, mount,
+hostname and util-linux `unshare` 2.38+ with unprivileged user, network, mount
+and UTS namespaces (`--map-root-user`, `--map-user`).
 
 ```bash
 scripts/capture --root /path/to/scratch --dry-run all   # plan and tool check; no network
