@@ -23,9 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Tools
-        run: sudo apt-get install --yes --no-install-recommends tmux jq shellcheck socat
+        run: sudo apt-get install --yes --no-install-recommends tmux jq socat
       - name: shellcheck
-        run: shellcheck scripts/capture scripts/hook-log scripts/model-stub
+        # Pinned so CI and local runs agree; the apt package is older.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/sc"
+          "$RUNNER_TEMP/sc/bin/pip" install --quiet shellcheck-py==0.11.0.1
+          "$RUNNER_TEMP/sc/bin/shellcheck" scripts/capture scripts/hook-log scripts/model-stub
       - name: capture dry run
         run: scripts/capture --root "$RUNNER_TEMP/capture" --dry-run all
       - name: evidence carries no credential or home path
