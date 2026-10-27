@@ -1,0 +1,936 @@
+#!/usr/bin/env bash
+# Capture kit for Meta's Muse Code CLI: records what the CLI shows without any
+# account, credential or real model, as evidence under compat/.
+#
+# The CLI is installed into a throwaway HOME below --root and driven through
+# the credential-free `--provider echo` provider. It never logs in, never
+# stores a credential and never calls a model.
+#
+# Requires: bash 4+, tmux, curl, sed, awk, jq, sha256sum, git, ps, socat, ip,
+# unshare. See README.md.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+
+ROOT="${CAPTURE_ROOT:-$REPO_DIR/.capture}"
+OUT="$REPO_DIR/compat"
+DRY_RUN=0
+INSTALLER_URL="${MUSE_INSTALLER_URL:-https://dev.meta.ai/install.sh}"
+# Terminal widths of the screen captures; the issue's contract is 20 to 200.
+WIDTHS=(20 40 80 120 160 200)
+HEIGHT=30
+# Poll interval and per-wait timeout of the pty driver, in seconds.
+POLL=0.2
+WAIT_TIMEOUT=30
+# Seconds the first frame needs before it accepts input.
+SETTLE=1.5
+# Pause between typed text and Enter; an Enter in the same burst is read as part
+# of a paste and inserts a newline.
+TYPE_PAUSE=0.4
+# Echo provider reply delay in ms; long enough to capture the working state.
+ECHO_DELAY_MS=4000
+# Hook events registered by the hooks scenario (docs "Lifecycle events" plus
+# the three names the published schema adds).
+HOOK_EVENTS=(SessionStart UserPromptSubmit PreToolUse PermissionRequest PostToolUse
+  PostToolUseFailure PostToolBatch PreLLMCall PostLLMCall PreCompact PostCompact
+  SubagentStart SubagentStop Notification Stop StopFailure SessionEnd Interrupt
+  ToolUseStart SessionFork)
+
+# Events whose hooks must declare async: true or Muse skips them.
+HOOK_ASYNC_EVENTS="Interrupt ToolUseStart"
+
+# jq filters: strings over 80 characters become a length marker; host-specific
+# fields (free disk space, pids) are dropped.
+LONG_STRING_FILTER='walk(if type == "string" and length > 80 then "<" + (length | tostring) + " chars>" else . end)'
+HOST_FIELD_FILTER='walk(if type == "object" then with_entries(select(.key | test("free_bytes|^pid$|_pid$") | not)) else . end)'
+
+STEPS_ALL=(install version login trust turn update-notice hooks sessions stub)
+
+usage() {
+  cat <<'EOF'
+usage: scripts/capture [--dry-run] [--root DIR] <step>...
+
+steps:
+  install        install the CLI into <root>/fakehome with the official installer
+  version        --version, --help of every command, install layout, binary sha256
+  login          login and API-key prompt screens (never submits anything)
+  trust          workspace trust dialog screens
+  turn           idle, working and done screens, OSC 7501 records, terminal title
+  update-notice  launcher update notice
+  hooks          hook payloads, hook environment, managed-hooks knobs
+  sessions       session store layout, fork, resume, prompt seeding
+  stub           approval screens and tool-call hooks against a loopback model stub
+  all            every step above, in that order
+
+--dry-run prints the plan and checks the host tools; it never touches the
+network and never starts the CLI.
+EOF
+}
+
+die() {
+  printf 'capture: %s\n' "$*" >&2
+  exit 1
+}
+
+log() {
+  printf 'capture: %s\n' "$*" >&2
+}
+
+require_tools() {
+  local tool missing=0
+  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip mount hostname; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      log "missing tool: $tool"
+      missing=1
+    fi
+  done
+  if command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
+    log "unshare lacks --map-user (util-linux 2.38 or later is required)"
+    missing=1
+  fi
+  ((missing == 0)) || die "install the missing tools"
+}
+
+# --- paths -----------------------------------------------------------------
+
+home_dir() { printf '%s/fakehome\n' "$ROOT"; }
+bin_dir() { printf '%s/fakehome/.local/bin\n' "$ROOT"; }
+scn_dir() { printf '%s/s/%s\n' "$ROOT" "$1"; }
+
+# --- redaction -------------------------------------------------------------
+
+# Replaces the capture root with a placeholder of the same length, so that
+# width-dependent screens keep their layout.
+redact() {
+  local pad repl
+  ((${#ROOT} >= 13)) || die "--root must be at least 13 characters long"
+  pad="$(printf '%*s' $((${#ROOT} - 13)) '' | tr ' ' '_')"
+  repl="/capture-root${pad}"
+  local esc
+  esc="$(printf '%s' "$ROOT" | sed -e 's/[][\\.*^$|&]/\\&/g')"
+  sed -e "s|${esc}|${repl}|g"
+}
+
+# Writes stdin to $1, redacted, creating the directory.
+emit() {
+  mkdir -p "$(dirname "$1")"
+  redact >"$1"
+}
+
+# Renders control bytes visibly so raw terminal output can be diffed.
+visible() {
+  LC_ALL=C sed -e 's/\x1b/<ESC>/g' -e 's/\x07/<BEL>/g' -e 's/\r/<CR>/g'
+}
+
+# --- scenario environment ---------------------------------------------------
+
+# prepare_scn <name> [KEY=VALUE...]: a scenario with its own XDG roots, a git
+# workspace and a launcher script that runs the CLI in a cleared environment.
+prepare_scn() {
+  local name="$1" s
+  shift
+  s="$(scn_dir "$name")"
+  # A CLI that was just stopped may still be writing into its data root.
+  for _ in 1 2 3 4 5; do
+    rm -rf "$s" && break
+    sleep 1
+  done
+  [[ ! -e "$s" ]] || die "cannot clear $s"
+  mkdir -p "$s/config" "$s/data" "$s/ws"
+  git -C "$s/ws" init -q .
+  {
+    printf '#!/bin/bash\n'
+    printf 'exec env -i HOME=%q PATH=/usr/bin:/bin TERM=xterm-256color \\\n' "$(home_dir)"
+    printf '  MUSE_NO_AUTO_UPDATE=1 XDG_CONFIG_HOME=%q XDG_DATA_HOME=%q \\\n' "$s/config" "$s/data"
+    local kv
+    for kv in "$@"; do
+      printf '  %q \\\n' "$kv"
+    done
+    printf '  %q "$@"\n' "$(bin_dir)/muse"
+  } >"$s/run"
+  chmod +x "$s/run"
+}
+
+# --- pty driver (tmux) -------------------------------------------------------
+
+TMUX_SOCKET=""
+RAW_FILE=""
+
+# The operator's tmux configuration must not change the captured screens.
+tm() { tmux -L "$TMUX_SOCKET" -f /dev/null "$@"; }
+
+# pty_start <scn> <width> <cwd> <muse args...>: starts the CLI in a detached
+# terminal. The raw output stream is recorded from the first byte.
+pty_start() {
+  local scn="$1" width="$2" cwd="$3" s gate
+  shift 3
+  s="$(scn_dir "$scn")"
+  TMUX_SOCKET="muse-capture-$$"
+  RAW_FILE="$s/raw.bin"
+  : >"$RAW_FILE"
+  gate="$s/gate"
+  rm -f "$gate"
+  mkfifo "$gate"
+  tm kill-server 2>/dev/null || true
+  tm new-session -d -x "$width" -y "$HEIGHT" -c "$cwd" \
+    "read -r _ < $(printf '%q' "$gate"); exec $(printf '%q ' "$s/run" "$@")"
+  tm pipe-pane -t 0 "cat >> $(printf '%q' "$RAW_FILE")"
+  printf 'go\n' >"$gate"
+  rm -f "$gate"
+}
+
+pty_stop() {
+  tm kill-server 2>/dev/null || true
+  sleep 1
+}
+
+pty_screen() { tm capture-pane -p -t 0; }
+
+# pty_wait <extended-regex> [timeout]: waits until the screen matches.
+pty_wait() {
+  local re="$1" limit="${2:-$WAIT_TIMEOUT}" waited=0
+  while ! pty_screen | grep -Eq -- "$re"; do
+    sleep "$POLL"
+    waited=$(awk -v w="$waited" -v p="$POLL" 'BEGIN { print w + p }')
+    if awk -v w="$waited" -v l="$limit" 'BEGIN { exit !(w >= l) }'; then
+      log "timeout waiting for /$re/"
+      return 1
+    fi
+  done
+}
+
+# pty_idle: waits for the composer, then lets the first frame settle; input
+# typed into the first frame is lost.
+pty_idle() {
+  pty_wait '❯' "${1:-$WAIT_TIMEOUT}" || return 1
+  sleep "$SETTLE"
+}
+
+pty_keys() { tm send-keys -t 0 "$@"; }
+
+# pty_quit: leaves the CLI in order so SessionEnd hooks run.
+pty_quit() {
+  pty_type '/exit'
+  sleep "$TYPE_PAUSE"
+  pty_keys Enter
+  sleep 3
+}
+pty_type() { tm send-keys -t 0 -l "$1"; }
+
+# pty_submit <text> <expected-regex>: types the text and submits it. A
+# first start initialises the data root before it accepts input, and an Enter
+# sent meanwhile is dropped, so the Enter is repeated until the expected text
+# shows.
+pty_submit() {
+  local text="$1" expect="$2"
+  pty_type "$text"
+  for _ in 1 2 3 4 5; do
+    sleep "$TYPE_PAUSE"
+    pty_keys Enter
+    if pty_wait "$expect" 8; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# pty_probe_reply: answers the CLI's OSC 7501 probe the way a Pohunek session
+# worker does (the probe echoed back).
+pty_probe_reply() { tm send-keys -t 0 -H 1b 5d 37 35 30 31 3b 3f 1b 5c; }
+
+# pty_snap <file>: the redacted visible screen, trailing blank rows trimmed.
+pty_snap() {
+  pty_screen | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' | emit "$1"
+}
+
+# osc_records <raw>: OSC 7501 report records in stream order.
+osc_records() {
+  LC_ALL=C grep -a -o $'\x1b\\]7501;[^\x07\x1b]*\\(\x07\\|\x1b\\\\\\)' "$1" | visible
+}
+
+# osc_titles <raw>: terminal title sequences, consecutive duplicates removed.
+osc_titles() {
+  LC_ALL=C grep -a -o $'\x1b\\]0;[^\x07]*' "$1" | visible | uniq
+}
+
+# no_credential_files: fails when any scenario or the throwaway HOME holds a
+# credential file.
+no_credential_files() {
+  local found
+  found="$(find "$ROOT/s" "$(home_dir)" \( -name 'auth.json' -o -name 'credentials*' \) 2>/dev/null | head -n 1)"
+  [[ -z "$found" ]] || die "credential file found: ${found#"$ROOT"/}"
+}
+
+# --- steps -------------------------------------------------------------------
+
+step_install() {
+  local dl="$ROOT/dl" installer
+  mkdir -p "$dl" "$(home_dir)"
+  installer="$dl/install.sh"
+  if [[ -x "$(bin_dir)/muse" && -f "$(bin_dir)/.muse-version" && -f "$installer" ]]; then
+    log "already installed: $(cat "$(bin_dir)/.muse-version")"
+    sha256sum "$installer" >"$dl/installer.sha256"
+    return 0
+  fi
+  curl -fsSL "$INSTALLER_URL" -o "$installer"
+  # The installer runs unpinned; its hash and output are recorded as provenance.
+  sha256sum "$installer" >"$dl/installer.sha256"
+  env -i HOME="$(home_dir)" PATH=/usr/bin:/bin MUSE_NO_MODIFY_PATH=1 \
+    MUSE_NO_AUTO_UPDATE=1 SHELL=/bin/bash bash "$installer" >"$dl/install.out" 2>&1
+}
+
+step_version() {
+  local b h c version
+  b="$(bin_dir)"
+  [[ -x "$b/muse" ]] || die "not installed; run the install step"
+  prepare_scn version
+  h="$(scn_dir version)/run"
+  mkdir -p "$OUT/install" "$OUT/help"
+  [[ -f "$ROOT/dl/installer.sha256" && -f "$ROOT/dl/install.out" ]] ||
+    die "installer provenance missing; run the install step"
+  awk '{print $1}' "$ROOT/dl/installer.sha256" | emit "$OUT/install/installer.sha256"
+  # The installer ran on the host, outside the bound root.
+  sed -e "s|${CAPTURE_HOST_ROOT:?}|${ROOT}|g" "$ROOT/dl/install.out" | emit "$OUT/install/installer-output.txt"
+  "$h" --version 2>&1 | emit "$OUT/install/version.txt"
+  version="$(cat "$b/.muse-version")"
+  printf '%s\n' "$version" >"$OUT/RELEASE"
+  {
+    printf 'launcher: muse (bash script, %s bytes)\n' "$(stat -c %s "$b/muse")"
+    printf 'version file: .muse-version = %s\n' "$version"
+    printf 'binary: muse-bin-%s (%s bytes)\n' "$version" "$(stat -c %s "$b/muse-bin-$version")"
+    printf 'binary sha256: %s\n' "$(sha256sum "$b/muse-bin-$version" | awk '{print $1}')"
+    printf 'launcher sha256: %s\n' "$(sha256sum "$b/muse" | awk '{print $1}')"
+    printf '\nrelease info (.muse-release-info.json):\n'
+    jq . "$b/.muse-release-info.json"
+    printf '\ninstall directory listing:\n'
+    find "$b" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort
+  } | emit "$OUT/install/layout.txt"
+  "$h" --help 2>&1 | emit "$OUT/help/muse.txt"
+  for c in resume exec usage serve sandbox init config plugins session-message \
+    skills export trace; do
+    "$h" "$c" --help 2>&1 | emit "$OUT/help/$c.txt" || true
+  done
+}
+
+# Writes the default-HOME layout evidence: where an unauthenticated start puts
+# its files when no XDG variable is set.
+step_home_layout() {
+  local ws="$ROOT/s/home-layout/ws"
+  rm -rf "$ROOT/s/home-layout"
+  mkdir -p "$ws" "$ROOT/fakehome-default"
+  git -C "$ws" init -q .
+  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
+  rm -rf "$ROOT/fakehome-default/.config" "$ROOT/fakehome-default/.local/share"
+  local run="$ROOT/s/home-layout/run"
+  {
+    printf '#!/bin/bash\n'
+    printf 'exec env -i HOME=%q PATH=/usr/bin:/bin TERM=xterm-256color MUSE_NO_AUTO_UPDATE=1 %q "$@"\n' \
+      "$ROOT/fakehome-default" "$ROOT/fakehome-default/.local/bin/muse"
+  } >"$run"
+  chmod +x "$run"
+  TMUX_SOCKET="muse-capture-$$"
+  RAW_FILE="$ROOT/s/home-layout/raw.bin"
+  : >"$RAW_FILE"
+  tm kill-server 2>/dev/null || true
+  tm new-session -d -x 120 -y "$HEIGHT" -c "$ws" "$(printf '%q ' "$run" --provider echo --trust-workspace)"
+  pty_idle || true
+  pty_submit 'hello' 'echo: hello' || true
+  pty_stop
+  (cd "$ROOT/fakehome-default" && find .config .local/share -maxdepth 3 \
+    -not -path '*/plugins/*' -not -path '*/skills/*' -not -path '*/local-tracing/*' | sort) |
+    emit "$OUT/sessions/default-home-tree.txt"
+}
+
+# login_screens <width>: the unauthenticated start. Enter is never sent on the
+# browser sign-in entry, which would start a device-code request at Meta.
+step_login() {
+  local w
+  prepare_scn login
+  for w in "${WIDTHS[@]}"; do
+    pty_start login "$w" "$(scn_dir login)/ws" --trust-workspace
+    if pty_wait 'Log in with browser|Set an API key'; then
+      pty_snap "$OUT/screens/login/$w.txt"
+      # Enter only after the selection sits on the API-key entry; Enter on
+      # the browser entry would start a device-code request.
+      sleep "$SETTLE"
+      pty_keys Down
+      if pty_wait 'Set an API key +· Enter to choose' 5; then
+        pty_keys Enter
+        if pty_wait 'Paste your Model API key' 10; then
+          pty_snap "$OUT/screens/api-key/$w.txt"
+        fi
+      fi
+    fi
+    pty_stop
+  done
+  no_credential_files
+}
+
+step_trust() {
+  local w
+  prepare_scn trust
+  for w in "${WIDTHS[@]}"; do
+    pty_start trust "$w" "$(scn_dir trust)/ws" --provider echo
+    if pty_wait 'Do you trust'; then
+      pty_snap "$OUT/screens/trust/$w.txt"
+    fi
+    pty_stop
+  done
+}
+
+# turn_at <width> <scenario> <answer|skip> [snap|nosnap]: idle, working and done
+# screens of one echo turn; the probe is answered or left unanswered.
+turn_at() {
+  local w="$1" scn="$2" answer="$3" snap="${4:-snap}"
+  snap_if() { [[ "$snap" == snap ]] && pty_snap "$@"; return 0; }
+  prepare_scn "$scn"
+  pty_start "$scn" "$w" "$(scn_dir "$scn")/ws" --provider echo --trust-workspace \
+    --echo-delay-ms "$ECHO_DELAY_MS"
+  if [[ "$answer" == answer ]]; then
+    sleep 1
+    pty_probe_reply
+  fi
+  pty_idle || return 0
+  snap_if "$OUT/screens/idle/$w.txt"
+  if [[ "$w" == 120 && "$snap" == snap ]]; then
+    # The launcher execs the versioned binary, so the pane process is the
+    # binary itself.
+    ps -o comm=,args= -p "$(tm display-message -p -t 0 '#{pane_pid}')" |
+      emit "$OUT/install/process.txt"
+  fi
+  # With the reply delayed, the first visible result of a submit is the
+  # working state.
+  if pty_submit 'hello there' 'Thinking|echo: hello'; then
+    snap_if "$OUT/screens/working/$w.txt"
+  fi
+  if pty_wait 'echo: hello'; then
+    snap_if "$OUT/screens/done/$w.txt"
+  fi
+  # The done record follows the reply.
+  sleep 2
+}
+
+step_turn() {
+  local w scn raw
+  for w in "${WIDTHS[@]}"; do
+    turn_at "$w" turn answer
+    pty_stop
+  done
+  # Probe answered and unanswered at the reference width.
+  for scn in answered unanswered; do
+    turn_at 120 turn "$([[ $scn == answered ]] && echo answer || echo skip)" nosnap
+    raw="$RAW_FILE"
+    {
+      printf '# probe %s; records in stream order\n' "$scn"
+      osc_records "$raw"
+    } | emit "$OUT/osc7501/turn-$scn.txt"
+    osc_titles "$raw" | emit "$OUT/osc7501/title-$scn.txt"
+    pty_stop
+  done
+  # Raw first bytes: the queries the CLI sends at startup.
+  head -c 400 "$(scn_dir turn)/raw.bin" | visible | emit "$OUT/osc7501/startup-queries.txt"
+}
+
+step_update_notice() {
+  local b notice
+  b="$(bin_dir)"
+  notice="$b/.muse-update-notice"
+  prepare_scn update-notice
+  printf '1.4.0-R1\t%s\n' "$(cat "$b/.muse-version")" >"$notice"
+  pty_start update-notice 120 "$(scn_dir update-notice)/ws" --provider echo --trust-workspace
+  pty_wait 'Muse Code updated|❯' || true
+  visible <"$RAW_FILE" | head -c 600 | emit "$OUT/screens/update-notice/raw-head.txt"
+  pty_snap "$OUT/screens/update-notice/120.txt"
+  pty_stop
+  rm -f "$notice"
+}
+
+# write_hooks_file <path> <log dir>: a nested hooks file that runs the logging
+# hook for every event.
+write_hooks_file() {
+  local path="$1" logdir="$2" ev entries=()
+  for ev in "${HOOK_EVENTS[@]}"; do
+    entries+=("$(jq -n --arg ev "$ev" --arg cmd "$ROOT/kit/hook-log $logdir $ev" \
+      --argjson async "$([[ " $HOOK_ASYNC_EVENTS " == *" $ev "* ]] && echo true || echo false)" \
+      '{($ev): [{hooks: [{type: "command", command: $cmd, timeout: 10} + (if $async then {async: true} else {} end)]}]}')")
+  done
+  printf '%s\n' "${entries[@]}" | jq -s '{hooks: (add)}' >"$path"
+}
+
+# wait_hook <logdir> <event-glob> <timeout>: waits until a hook whose event
+# name matches the glob has been logged.
+wait_hook() {
+  local logdir="$1" glob="$2" limit="$3" waited=0
+  while ! compgen -G "$logdir/*-$glob.json" >/dev/null; do
+    sleep 1
+    waited=$((waited + 1))
+    ((waited < limit)) || return 1
+  done
+}
+
+# collect_hooks <logdir> <dest>: the redacted payloads, one file per call,
+# numbered in start order.
+collect_hooks() {
+  local logdir="$1" dest="$2" f n=0 event
+  mkdir -p "$dest"
+  for f in "$logdir"/*.json; do
+    [[ -e "$f" ]] || continue
+    event="$(basename "$f" .json)"
+    event="${event#*-}"
+    n=$((n + 1))
+    # Redaction runs on the whole text first; long strings (Muse's internal
+    # prompts) are then replaced by a length marker.
+    redact <"$f" | jq -c "$LONG_STRING_FILTER" >"$(printf '%s/%03d-%s.json' "$dest" "$n" "$event")"
+  done
+}
+
+step_hooks() {
+  local s ws logdir
+  # 1. Project hooks (needs trust) over a full turn, /clear, a second turn and
+  # an orderly exit.
+  prepare_scn hooks CAPTURE_PROBE=probe-value
+  s="$(scn_dir hooks)"
+  ws="$s/ws"
+  logdir="$s/hooklog"
+  mkdir -p "$logdir" "$ws/.muse"
+  write_hooks_file "$ws/.muse/hooks.json" "$logdir"
+  pty_start hooks 120 "$ws" --provider echo --trust-workspace
+  sleep 1
+  pty_probe_reply
+  pty_idle || true
+  pty_submit 'hello there' 'echo: hello' || true
+  pty_type '/clear'
+  sleep "$TYPE_PAUSE"
+  pty_keys Enter
+  pty_wait 'started a fresh session' 15 || true
+  pty_snap "$OUT/screens/clear/120.txt"
+  pty_submit 'second turn' 'echo: second turn' || true
+  pty_quit
+  pty_stop
+  collect_hooks "$logdir" "$OUT/hooks/project"
+
+  # 2. Managed hooks through the environment override, with the passthrough
+  # list. CAPTURE_PROBE is set in the CLI environment and listed in
+  # managed_hooks_env_vars on the command line.
+  prepare_scn hooks-managed CAPTURE_PROBE=probe-value \
+    "TBH_MANAGED_HOOKS_PATH=$(scn_dir hooks-managed)/managed.json"
+  s="$(scn_dir hooks-managed)"
+  ws="$s/ws"
+  logdir="$s/hooklog"
+  mkdir -p "$logdir"
+  write_hooks_file "$s/managed.json" "$logdir"
+  pty_start hooks-managed 120 "$ws" --provider echo --trust-workspace \
+    -c 'managed_hooks_env_vars=["CAPTURE_PROBE"]'
+  pty_idle || true
+  pty_submit 'hello there' 'echo: hello' || true
+  pty_quit
+  pty_stop
+  collect_hooks "$logdir" "$OUT/hooks/managed-env"
+
+  # 3. The same managed file without the passthrough list.
+  prepare_scn hooks-managed-nolist CAPTURE_PROBE=probe-value \
+    "TBH_MANAGED_HOOKS_PATH=$(scn_dir hooks-managed-nolist)/managed.json"
+  s="$(scn_dir hooks-managed-nolist)"
+  ws="$s/ws"
+  logdir="$s/hooklog"
+  mkdir -p "$logdir"
+  write_hooks_file "$s/managed.json" "$logdir"
+  pty_start hooks-managed-nolist 120 "$ws" --provider echo --trust-workspace
+  pty_idle || true
+  pty_submit 'hello there' 'echo: hello' || true
+  pty_quit
+  pty_stop
+  collect_hooks "$logdir" "$OUT/hooks/managed-nolist"
+}
+
+# session_head <session.jsonl> <dest>: the record kinds of the first records,
+# with every string over 80 characters replaced by a length marker and host
+# fields dropped, so the evidence shows the envelope and not
+# prompt text.
+session_head() {
+  local f="$1" dest="$2"
+  head -n 8 "$f" | redact | jq -c "$LONG_STRING_FILTER | $HOST_FIELD_FILTER" 2>/dev/null |
+    emit "$dest"
+}
+
+step_sessions() {
+  local s ws data sid fork_sid f target n
+  prepare_scn sessions
+  s="$(scn_dir sessions)"
+  ws="$s/ws"
+  data="$s/data/muse"
+  mkdir -p "$ws/.muse" "$s/hooklog"
+  write_hooks_file "$ws/.muse/hooks.json" "$s/hooklog"
+
+  pty_start sessions 120 "$ws" --provider echo --trust-workspace
+  sleep 1
+  pty_probe_reply
+  pty_idle || true
+  pty_submit 'first turn' 'echo: first turn' || true
+  pty_type '/fork'
+  sleep "$TYPE_PAUSE"
+  pty_keys Enter
+  pty_wait 'Fork created' 15 || true
+  pty_snap "$OUT/screens/fork/120.txt"
+  fork_sid="$(pty_screen | grep -Eo 'muse resume [0-9a-f-]{36}' | head -n 1 | awk '{print $3}' || true)"
+  pty_quit
+  pty_stop
+
+  (cd "$s/data" && find . -not -path '*/plugins/*' -not -path '*/skills/*' \
+    -not -path '*/local-tracing/*' | sort) | emit "$OUT/sessions/tree.txt"
+  n=0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    session_head "$f" "$OUT/sessions/head-$n.jsonl"
+  done < <(find "$data/sessions" -name session.jsonl -not -path '*/subagent/*' | sort | head -n 3)
+  n=0
+  while IFS= read -r f; do
+    n=$((n + 1))
+    redact <"$f" | emit "$OUT/sessions/runtime-$n.json"
+  done < <(find "$data/runtime" -name '*.json' 2>/dev/null | sort | head -n 3)
+  collect_hooks "$s/hooklog" "$OUT/hooks/fork-session"
+
+  # Resume the root session and the fork the first session created. A prompt
+  # follows each resume: the hook for a session start is not reported before
+  # the first turn.
+  sid="$(find "$data/sessions" -name session.jsonl -not -path '*/subagent/*' | sort | head -n 1 |
+    xargs -r dirname | xargs -r basename)"
+  for target in "root:$sid" "fork:$fork_sid"; do
+    [[ -n "${target#*:}" ]] || continue
+    for f in "$s"/hooklog/*; do
+      [[ -e "$f" ]] && rm -f "$f"
+    done
+    pty_start sessions 120 "$ws" --provider echo --trust-workspace resume "${target#*:}"
+    sleep 1
+    pty_probe_reply
+    pty_idle || true
+    pty_snap "$OUT/screens/resume/${target%%:*}.txt"
+    pty_submit 'after resume' 'echo: after resume' || true
+    pty_quit
+    pty_stop
+    collect_hooks "$s/hooklog" "$OUT/hooks/resume-${target%%:*}"
+  done
+
+  # A positional prompt seeds the first turn.
+  prepare_scn seed
+  pty_start seed 120 "$(scn_dir seed)/ws" --provider echo --trust-workspace 'seeded prompt'
+  if pty_wait 'echo: seeded prompt' 20; then
+    printf 'positional prompt seeds the first turn: yes\n' | emit "$OUT/sessions/seed.txt"
+  else
+    printf 'positional prompt seeds the first turn: no\n' | emit "$OUT/sessions/seed.txt"
+  fi
+  pty_snap "$OUT/screens/seed/120.txt"
+  pty_stop
+}
+
+# The loopback model stub: a socat listener runs scripts/model-stub per
+# connection; the step runs inside the loopback-only namespace set up by main.
+step_stub() {
+  local port=18081 state="$ROOT/stub-state" listener w s ws snap_name
+  mkdir -p "$state"
+  : >"$state/requests.log"
+  STUB_STATE="$state" STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK \
+    STUB_TOOL_COMMAND='echo capture > capture-artifact.txt' \
+    socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" "EXEC:$ROOT/kit/model-stub" &
+  listener=$!
+  # shellcheck disable=SC2064
+  trap "kill $listener 2>/dev/null || true" EXIT
+  sleep 1
+
+  # stub_run <width> <approval answer: allow|abort|none>
+  stub_run() {
+    local width="$1" answer="$2" logdir
+    rm -f "$state/tool-served" "$state/ask-served"
+    prepare_scn stub META_API_KEY=capture-placeholder-not-a-key
+    s="$(scn_dir stub)"
+    ws="$s/ws"
+    logdir="$s/hooklog"
+    mkdir -p "$logdir" "$ws/.muse"
+    write_hooks_file "$ws/.muse/hooks.json" "$logdir"
+    pty_start stub "$width" "$ws" --provider meta --base-url "http://127.0.0.1:$port" --trust-workspace
+    sleep 1
+    pty_probe_reply
+    pty_idle || return 0
+    pty_submit 'please STUB_TOOL' 'Reviewing approval|Calling tools|Would you|stub reply' || return 0
+    pty_wait 'Would you' 60 || return 0
+    snap_name="$OUT/screens/approval/$width.txt"
+    pty_snap "$snap_name"
+    case "$answer" in
+      allow)
+        pty_keys Enter
+        wait_hook "$logdir" 'PostToolUse*' 30 || true
+        pty_snap "$OUT/screens/approval-allowed/$width.txt"
+        ;;
+      abort)
+        pty_keys Escape
+        sleep 4
+        pty_snap "$OUT/screens/approval-aborted/$width.txt"
+        ;;
+    esac
+    if [[ "$answer" != none ]]; then
+      {
+        printf '# approval %s; records in stream order\n' "$answer"
+        osc_records "$RAW_FILE"
+      } | emit "$OUT/osc7501/approval-$answer.txt"
+      collect_hooks "$logdir" "$OUT/hooks/stub-$answer"
+    fi
+    pty_quit
+    pty_stop
+  }
+
+  # stub_ask <width>: the structured-question picker.
+  stub_ask() {
+    local width="$1" logdir
+    rm -f "$state/tool-served" "$state/ask-served"
+    prepare_scn stub META_API_KEY=capture-placeholder-not-a-key
+    s="$(scn_dir stub)"
+    ws="$s/ws"
+    logdir="$s/hooklog"
+    mkdir -p "$logdir" "$ws/.muse"
+    write_hooks_file "$ws/.muse/hooks.json" "$logdir"
+    pty_start stub "$width" "$ws" --provider meta --base-url "http://127.0.0.1:$port" --trust-workspace
+    sleep 1
+    pty_probe_reply
+    pty_idle || return 0
+    pty_submit 'please STUB_ASK' 'Thinking|Request user input|Small|stub reply' || return 0
+    if pty_wait 'Small' 60; then
+      pty_snap "$OUT/screens/question/$width.txt"
+      if [[ "$width" == 120 ]]; then
+        {
+          printf '# question picker; records in stream order\n'
+          osc_records "$RAW_FILE"
+        } | emit "$OUT/osc7501/question.txt"
+        collect_hooks "$logdir" "$OUT/hooks/stub-question"
+      fi
+    fi
+    pty_stop
+  }
+
+  for w in "${WIDTHS[@]}"; do
+    stub_run "$w" none
+    stub_ask "$w"
+  done
+  stub_run 120 allow
+  stub_run 120 abort
+  cp "$state/requests.log" "$ROOT/stub-requests.log"
+  redact <"$ROOT/stub-requests.log" | sort | uniq -c | emit "$OUT/stub/requests.txt"
+}
+
+# --- main --------------------------------------------------------------------
+
+dry_run() {
+  local step
+  printf 'capture plan (dry run)\n'
+  printf '  root: %s\n' "$ROOT"
+  printf '  out:  %s\n' "$OUT"
+  printf '  widths: %s\n' "${WIDTHS[*]}"
+  printf '  steps: %s\n' "$*"
+  for step in "$@"; do
+    case "$step" in
+      install | version | login | trust | turn | update-notice | hooks | sessions | stub) ;;
+      *) die "unknown step: $step" ;;
+    esac
+  done
+  require_tools
+  # The redaction keeps the width of the replaced path.
+  local sample
+  sample="$(printf '%s/x' "$ROOT" | redact)"
+  [[ "${#sample}" -eq $((${#ROOT} + 2)) ]] || die "redaction changed the width"
+  [[ "$sample" != *"$ROOT"* ]] || die "redaction left the root in place"
+  bash -n "$SCRIPT_DIR/capture"
+  bash -n "$SCRIPT_DIR/hook-log"
+  bash -n "$SCRIPT_DIR/model-stub"
+  printf 'dry run ok\n'
+}
+
+main() {
+  local steps=() arg
+  while (($# > 0)); do
+    arg="$1"
+    shift
+    case "$arg" in
+      --dry-run) DRY_RUN=1 ;;
+      --root)
+        (($# > 0)) || die "--root needs a directory"
+        ROOT="$1"
+        shift
+        ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      all) steps+=("${STEPS_ALL[@]}") ;;
+      -*) die "unknown option: $arg" ;;
+      *) steps+=("$arg") ;;
+    esac
+  done
+  ((${#steps[@]} > 0)) || {
+    usage >&2
+    exit 2
+  }
+  ROOT="$(mkdir -p "$ROOT" && cd "$ROOT" && pwd -P)"
+  if ((DRY_RUN == 1)); then
+    dry_run "${steps[@]}"
+    exit 0
+  fi
+  require_tools
+  mkdir -p "$OUT"
+  # Every step except install runs in a network namespace that has only a
+  # loopback interface, so no capture can reach Meta. Inside it the capture
+  # root is bound to a fixed path, the hook scripts are copied into it, a
+  # synthetic passwd/group names the caller `capture`, and the
+  # CLI runs under the caller's uid in a nested user namespace.
+  if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
+    local rest=()
+    for arg in "${steps[@]}"; do
+      if [[ "$arg" == install ]]; then
+        step_install
+      else
+        rest+=("$arg")
+      fi
+    done
+    ((${#rest[@]} > 0)) || exit 0
+    CAPTURE_IN_NETNS=1 CAPTURE_NS_STAGE=outer CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+      CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
+      CAPTURE_UID="$(id -u)" CAPTURE_GID="$(id -g)" \
+      exec unshare --user --map-root-user --net --mount --uts \
+      bash "$SCRIPT_DIR/capture" --root "$ROOT" "${rest[@]}"
+  fi
+  if [[ "${CAPTURE_NS_STAGE:-}" == outer ]]; then
+    ip link set lo up
+    hostname capture
+    mount -t tmpfs tmpfs /run
+    mkdir /run/capture-root
+    mount --bind "$ROOT" /run/capture-root
+    printf 'capture:x:%s:%s:capture:/run/capture-root/fakehome:/bin/bash\n' \
+      "$CAPTURE_UID" "$CAPTURE_GID" >/run/passwd
+    printf 'capture:x:%s:\n' "$CAPTURE_GID" >/run/group
+    mount --bind /run/passwd /etc/passwd
+    mount --bind /run/group /etc/group
+    CAPTURE_NS_STAGE=inner exec unshare --user --map-user="$CAPTURE_UID" --map-group="$CAPTURE_GID" \
+      bash "$SCRIPT_DIR/capture" --root /run/capture-root "${steps[@]}"
+  fi
+  assert_isolated
+  # The hook scripts live under the bound root, so no hooks.json holds a host path.
+  mkdir -p "$ROOT/kit"
+  cp "$SCRIPT_DIR/hook-log" "$SCRIPT_DIR/model-stub" "$ROOT/kit/"
+  local stage
+  for arg in "${steps[@]}"; do
+    log "step: $arg"
+    stage="$ROOT/stage/$arg"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+    OUT_FINAL="$OUT"
+    OUT="$stage"
+    run_step "$arg"
+    scan_evidence "$stage"
+    OUT="$OUT_FINAL"
+    swap_step "$arg" "$stage"
+  done
+}
+
+# assert_isolated: only a loopback interface exists and no host path is mapped.
+assert_isolated() {
+  local links
+  links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
+  [[ "$links" == "lo " ]] || die "network namespace is not loopback-only: $links"
+  [[ -n "${CAPTURE_HOST_ROOT:-}" && "$ROOT" == /run/capture-root ]] ||
+    die "capture root is not bound inside the namespace"
+}
+
+# scan_evidence <dir>: fails when a host-specific string appears in the staged
+# evidence, case-insensitively. Each file is also searched with whitespace and
+# box-drawing characters removed (a value wrapped across rows), and the host
+# path components, user and hostname are searched in truncated forms.
+scan_evidence() {
+  local dir="$1" needle f squashed lower bad=0 part
+  local needles=() derived=()
+  local raw=("$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$CAPTURE_HOST_USER" \
+    "$CAPTURE_HOST_HOSTNAME" "$SCRIPT_DIR" "$REPO_DIR")
+  for needle in "${raw[@]}"; do
+    [[ -n "$needle" ]] && needles+=("$needle")
+  done
+  # Path components that identify the host: those with a digit or underscore.
+  for needle in "$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$SCRIPT_DIR" "$REPO_DIR"; do
+    for part in ${needle//\// }; do
+      [[ ${#part} -ge 4 && "$part" =~ [0-9_] ]] && needles+=("$part")
+    done
+  done
+  # Truncated renderings: a prefix or suffix of at least three characters next
+  # to an ellipsis.
+  for needle in "${needles[@]}"; do
+    ((${#needle} >= 5)) || continue
+    local n
+    for ((n = 3; n < ${#needle}; n++)); do
+      derived+=("${needle:0:n}…" "…${needle:${#needle}-n}")
+    done
+  done
+  needles+=("${derived[@]}")
+  while IFS= read -r -d '' f; do
+    lower="$(tr '[:upper:]' '[:lower:]' <"$f")"
+    squashed="$(printf '%s' "$lower" | sed -e 's/[│┃║─ \t\r]//g' | tr -d '\n')"
+    for needle in "${needles[@]}"; do
+      local ln="${needle,,}"
+      if [[ "$lower" == *"$ln"* || "$squashed" == *"${ln//[[:space:]]/}"* ]]; then
+        log "host value in ${f#"$dir"/}: $needle"
+        bad=1
+      fi
+    done
+    if [[ "$squashed" =~ /(home|users|root)/[a-z0-9._-]+ ]]; then
+      log "home path in ${f#"$dir"/}"
+      bad=1
+    fi
+  done < <(find "$dir" -type f -print0)
+  ((bad == 0)) || die "host-specific data in the evidence; nothing was published"
+}
+
+# Paths under compat/ each step owns; a successful step replaces them.
+step_owned() {
+  case "$1" in
+    version) echo "install/installer.sha256 install/installer-output.txt install/layout.txt install/version.txt help sessions/default-home-tree.txt RELEASE" ;;
+    login) echo "screens/login screens/api-key" ;;
+    trust) echo "screens/trust" ;;
+    turn) echo "install/process.txt screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt" ;;
+    update-notice) echo "screens/update-notice" ;;
+    hooks) echo "hooks/project hooks/managed-env hooks/managed-nolist screens/clear" ;;
+    sessions) echo "screens/fork screens/resume screens/seed hooks/fork-session hooks/resume-root hooks/resume-fork sessions/head-1.jsonl sessions/head-2.jsonl sessions/head-3.jsonl sessions/tree.txt sessions/seed.txt sessions/runtime-1.json sessions/runtime-2.json sessions/runtime-3.json" ;;
+    stub) echo "screens/approval screens/approval-allowed screens/approval-aborted screens/question osc7501/approval-allow.txt osc7501/approval-abort.txt osc7501/question.txt hooks/stub-allow hooks/stub-abort hooks/stub-question stub" ;;
+  esac
+}
+
+# swap_step <step> <stage>: replaces the step's paths in compat/ by the staged
+# ones.
+swap_step() {
+  local step="$1" stage="$2" rel
+  for rel in $(step_owned "$step"); do
+    rm -rf "${OUT:?}/$rel"
+  done
+  cp -a "$stage/." "$OUT/"
+}
+
+run_step() {
+  local arg="$1"
+  {
+    case "$arg" in
+      install) ;;
+      version)
+        step_version
+        step_home_layout
+        ;;
+      login) step_login ;;
+      trust) step_trust ;;
+      turn) step_turn ;;
+      update-notice) step_update_notice ;;
+      hooks) step_hooks ;;
+      sessions) step_sessions ;;
+      stub)
+        step_stub
+        no_credential_files
+        ;;
+      *) die "unknown step: $arg" ;;
+    esac
+  }
+}
+
+main "$@"

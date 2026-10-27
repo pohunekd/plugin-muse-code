@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# One-connection handler of the capture kit's loopback model stub, run by socat
+# for every accepted connection (see step_stub in scripts/capture). It answers
+# the two routes Muse Code uses against a custom base URL:
+#   GET  <base>/muse-code/models  one visible model row
+#   POST <base>/responses         a streamed text turn, or one scripted bash tool
+#                                 call when the request mentions STUB_TOOL_MARKER, or
+#                                 one request_user_input call for STUB_ASK_MARKER
+# No credential is read or checked; nothing leaves the loopback interface.
+# Environment: STUB_STATE (state dir), STUB_HOLD (seconds a turn stays open),
+# STUB_TOOL_MARKER, STUB_TOOL_COMMAND, STUB_ASK_MARKER.
+set -u
+
+state="${STUB_STATE:?STUB_STATE is not set}"
+hold="${STUB_HOLD:?STUB_HOLD is not set}"
+marker="${STUB_TOOL_MARKER:?STUB_TOOL_MARKER is not set}"
+command_line="${STUB_TOOL_COMMAND:?STUB_TOOL_COMMAND is not set}"
+ask_marker="${STUB_ASK_MARKER:?STUB_ASK_MARKER is not set}"
+model="stub-model"
+
+sse() {
+  printf 'data: %s\n\n' "$1"
+}
+
+frame() {
+  jq -cn --arg id "$1" --arg status "$2" --arg model "$model" \
+    '{id: $id, object: "response", model: $model, status: $status, output: []}'
+}
+
+read -r request_line || exit 0
+request_line="${request_line%$'\r'}"
+method="${request_line%% *}"
+path="${request_line#* }"
+path="${path%% *}"
+length=0
+while IFS= read -r header; do
+  header="${header%$'\r'}"
+  [[ -n "$header" ]] || break
+  case "${header,,}" in
+    content-length:*) length="${header#*:}" ;;
+  esac
+done
+length="${length//[[:space:]]/}"
+[[ "$length" =~ ^[0-9]+$ ]] || length=0
+body=""
+if ((length > 0)); then
+  body="$(head -c "$length")"
+fi
+printf '%s %s %s bytes\n' "$method" "$path" "$length" >>"$state/requests.log"
+if [[ -n "${STUB_DUMP:-}" ]]; then
+  printf '%s' "$body" >"$state/body-$(date +%s%N).json"
+fi
+
+if [[ "$method" == GET && "$path" == */muse-code/models ]]; then
+  payload="$(jq -cn --arg model "$model" '{object: "list", data: [{id: $model, object: "model",
+    metadata: {"muse-code": {release_date: "2026-01-01", is_hidden: false,
+    limit: {context: 1000000, output: 1024}}}}]}')"
+  printf 'HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: %s\r\nconnection: close\r\n\r\n%s' \
+    "${#payload}" "$payload"
+  exit 0
+fi
+
+if [[ "$method" == POST && "$path" == */responses ]]; then
+  printf 'HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n'
+  sse "$(jq -cn --argjson r "$(frame resp_stub in_progress)" \
+    '{type: "response.created", sequence_number: 1, response: $r}')"
+  # Only the main agent's request lists the bash tool; the reminder observers
+# list submit_reminder_decision and must get the text turn.
+if [[ "$body" == *"$marker"* && "$body" == *'"name":"bash"'* &&
+  "$body" != *submit_reminder_decision* && ! -e "$state/tool-served" ]]; then
+    : >"$state/tool-served"
+    sse "$(jq -cn --arg cmd "$command_line" '{type: "response.function_call_arguments.done",
+      sequence_number: 2, output_index: 0, item_id: "fc_stub", name: "bash", call_id: "call_stub",
+      arguments: ({command: $cmd, description: "Write the capture artifact"} | tojson)}')"
+  elif [[ "$body" == *"$ask_marker"* && "$body" == *'"name":"bash"'* &&
+    "$body" != *submit_reminder_decision* && ! -e "$state/ask-served" ]]; then
+    : >"$state/ask-served"
+    sse "$(jq -cn '{type: "response.function_call_arguments.done",
+      sequence_number: 2, output_index: 0, item_id: "fc_ask", name: "request_user_input", call_id: "call_ask",
+      arguments: ({questions: [{id: "scope", header: "Scope", question: "Which scope should the change cover?",
+        options: [{label: "Small", description: "Touch one file."},
+                  {label: "Large", description: "Touch the whole module."}]}]} | tojson)}')"
+  else
+    sse "$(jq -cn '{type: "response.output_text.delta", sequence_number: 2, output_index: 0,
+      item_id: "msg_stub", content_index: 0, delta: "stub reply"}')"
+  fi
+  sleep "$hold"
+  sse "$(jq -cn --argjson r "$(frame resp_stub completed)" \
+    '{type: "response.completed", sequence_number: 3,
+      response: ($r + {usage: {input_tokens: 1, output_tokens: 1, total_tokens: 2}})}')"
+  exit 0
+fi
+
+printf 'HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n'
