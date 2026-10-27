@@ -203,7 +203,7 @@ pty_wait() {
 # pty_idle: waits for the composer, then lets the first frame settle; input
 # typed into the first frame is lost.
 pty_idle() {
-  pty_wait '❯' "${1:-$WAIT_TIMEOUT}" || return 1
+  pty_wait '❯' "$WAIT_TIMEOUT" || return 1
   sleep "$SETTLE"
 }
 
