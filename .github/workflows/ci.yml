@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same PR cancels its older run; main runs are never
+# cancelled so every merge commit gets a result.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    name: scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Tools
+        run: sudo apt-get install --yes --no-install-recommends tmux jq shellcheck
+      - name: shellcheck
+        run: shellcheck scripts/capture scripts/hook-log
+      - name: capture dry run
+        run: scripts/capture --root "$RUNNER_TEMP/capture" --dry-run all
+      - name: evidence carries no credential
+        # The kit never logs in; a credential-shaped string in compat/ is a bug.
+        run: |
+          if grep -rEI 'META_API_KEY=[^ ]|Bearer [A-Za-z0-9._-]{20,}|"api_key"' compat; then
+            echo "credential-shaped string in compat/" >&2
+            exit 1
+          fi

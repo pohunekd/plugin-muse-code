@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Logging hook for the capture kit. Muse Code runs it with a cleared
+# environment; it records the stdin payload and the names of the variables it
+# received, with values only for the names the capture cares about.
+# usage (as a hook command): hook-log <log dir> <event>
+set -u
+
+logdir="$1"
+event="$2"
+mkdir -p "$logdir"
+
+# Hooks of one event can run concurrently; a nanosecond stamp keeps the files
+# unique and in start order.
+base="$logdir/$(date +%s%N)-$event"
+
+payload="$(cat)"
+vars=()
+while IFS= read -r name; do
+  vars+=("$name")
+done < <(compgen -e | sort)
+
+values=()
+for name in "${vars[@]}"; do
+  case "$name" in
+    MUSE_* | TBH_* | POHUNEK_* | CAPTURE_*) values+=("$name=${!name}") ;;
+  esac
+done
+
+jq -n \
+  --arg event "$event" \
+  --argjson names "$(printf '%s\n' "${vars[@]}" | jq -R . | jq -s .)" \
+  --argjson values "$(printf '%s\n' "${values[@]}" | jq -R . | jq -s .)" \
+  --arg payload "$payload" \
+  '{event: $event, env_names: $names, env_values: $values,
+    stdin: ($payload | try fromjson catch $payload)}' >"$base.json"
+exit 0

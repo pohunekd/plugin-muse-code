@@ -37,3 +37,10 @@ under epic `zajca/pohunek#1644`; this repository's issues are P0-P5.
 - **Comments** state what the code does or why, never the change history.
 - Never read `.env*`, key, or credential files. Never call `env` or `printenv`;
   check a variable with `test -n "$VAR"`.
+
+## Commands
+
+```bash
+scripts/capture --root <dir> --dry-run all   # plan and tool check, no network
+scripts/capture --root <dir> all             # install the CLI and capture everything
+```
