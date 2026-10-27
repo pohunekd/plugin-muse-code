@@ -125,12 +125,28 @@ redact() {
   ((${#ROOT} >= 13)) || die "--root must be at least 13 characters long"
   pad="$(printf '%*s' $((${#ROOT} - 13)) '' | tr ' ' '_')"
   repl="/capture-root${pad}"
-  local esc
-  esc="$(printf '%s' "$ROOT" | sed -e 's/[][\\.*^$|&]/\\&/g')"
-  # macOS reports /private/tmp for /tmp; both spellings are replaced.
-  local alias_esc
-  alias_esc="$(printf '%s' "${ROOT#/private}" | sed -e 's/[][\\.*^$|&]/\\&/g')"
-  sed -e "s|${esc}|${repl}|g" -e "s|${alias_esc}|${repl}|g"
+  # macOS reports /private/tmp for /tmp; both spellings are replaced. The CLI
+  # wraps a long path across rows at narrow widths, so a match may contain a
+  # line break and the indentation after it; those characters are kept and
+  # the placeholder fills the others, which preserves the screen layout.
+  perl -0777 -e '
+    my ($root, $alias, $ph) = @ARGV;
+    local $/;
+    my $text = <STDIN>;
+    for my $needle (grep { length } ($root, $alias)) {
+      my $re = join(q{(?:\n[ ]*)?}, map { quotemeta } split //, $needle);
+      $text =~ s{$re}{
+        my ($m, $i, $gap, $out) = ($&, 0, 0, q{});
+        for my $c (split //, $m) {
+          if ($c eq "\n") { $gap = 1; $out .= $c }
+          elsif ($c eq q{ } && $gap) { $out .= $c }
+          else { $gap = 0; $out .= substr($ph, $i++, 1) }
+        }
+        $out
+      }ge;
+    }
+    print $text;
+  ' -- "$ROOT" "${ROOT#/private}" "$repl"
 }
 
 # Writes stdin to $1, redacted, creating the directory.
