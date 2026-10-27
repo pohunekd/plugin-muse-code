@@ -1,0 +1,8 @@
+# approval allow; records in stream order
+<ESC>]7501;?<ESC>\
+<ESC>]7501;state=idle:app=muse<ESC>\
+<ESC>]7501;state=working:app=muse<ESC>\
+<ESC>]7501;state=blocked:kind=permission:app=muse<ESC>\
+<ESC>]7501;state=working:app=muse<ESC>\
+<ESC>]7501;state=working:app=muse:id=term-8ccd1fb275b9ddcb<ESC>\
+<ESC>]7501;state=clear:id=term-8ccd1fb275b9ddcb<ESC>\

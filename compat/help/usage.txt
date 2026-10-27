@@ -1,0 +1,8 @@
+Show your subscription allowance (no model turn)
+
+Usage: muse usage [--json]
+
+Options:
+  --json  Print one JSON object
+  -h, --help  Print help
+

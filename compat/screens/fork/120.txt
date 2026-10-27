@@ -1,0 +1,16 @@
+
+  Muse Code 1.4.14
+
+❯ first turn
+
+◆ echo: first turn
+
+  Fork created: 01a17f20-5ca6-79f0-83ec-562a56ef53ee
+  Source session stays active.
+  Continue the fork:
+  muse resume 01a17f20-5ca6-79f0-83ec-562a56ef53ee
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  echo · /capture-root____/s/sessions/ws · Auto-review

@@ -1,0 +1,5 @@
+Installed muse to ~/.local/bin/muse
+
+~/.local/bin is not on your PATH (skipped by MUSE_NO_MODIFY_PATH).
+To run muse by name, add it yourself:
+  export PATH="/capture-root____/fakehome/.local/bin:$PATH"

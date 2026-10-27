@@ -1,0 +1,16 @@
+
+  Muse Code 1.4.14
+
+  resumed session 01a17f20-4f5a-7730-bf5f-3305b13c0acb
+
+❯ first turn
+
+◆ echo: first turn
+
+  session 01a17f20-4f5a-7730-bf5f-3305b13c0acb does not record a usable model for provider echo; using the provider
+  default model
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  echo · …/ws · Auto-review system SSH configuration projection omitted: source ownership, mode or type does not qualify

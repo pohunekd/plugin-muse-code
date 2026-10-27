@@ -1,0 +1,5 @@
+usage: muse session-message <command> [options]
+
+commands:
+  muse session-message list [--json]
+  muse session-message send --target <session-uuid-or-name> [--in-reply-to <reply-token>] [--display-context <json>] [--json] < body

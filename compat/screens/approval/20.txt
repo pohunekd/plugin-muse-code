@@ -1,0 +1,25 @@
+
+  Muse Code 1.4.14
+
+❯ please STUB_TOOL
+
+◈ Calling tools (13s
+
+────────────────────
+Would you like to ru
+
+  $ echo capture >
+    capture-artifact
+    .txt
+  Stage 1/1
+  Current argv: ["ec
+                ho",
+                "cap
+                ture
+                "]
+
+⟩ 1. Allow this stag
+  2. Abort the entir
+...in /permissions
+────────────────────
+  stub-model · high
