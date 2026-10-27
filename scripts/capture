@@ -106,8 +106,9 @@ require_tools() {
   ((missing == 0)) || die "install the missing tools"
 }
 
-# Denies the network except loopback (macOS).
-SANDBOX_PROFILE='(version 1)(allow default)(deny network*)(allow network* (remote ip "localhost:*"))(allow network* (local ip "localhost:*"))'
+# Denies the network except loopback and unix sockets (macOS); tmux needs the
+# sockets.
+SANDBOX_PROFILE='(version 1)(allow default)(deny network*)(allow network-bind (local unix-socket))(allow network-outbound (remote unix-socket))(allow network-outbound (remote ip "localhost:*"))(allow network-bind (local ip "localhost:*"))(allow network-inbound (local ip "localhost:*"))'
 
 # --- paths -----------------------------------------------------------------
 
