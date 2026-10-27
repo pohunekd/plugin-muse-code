@@ -101,7 +101,7 @@ unverified.
 
 ### macOS arm64
 
-Captured on a macOS 15 arm64 host in a throwaway HOME under the sandbox profile above; evidence in `compat/macos-arm64/`.
+Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox profile above; evidence in `compat/macos-arm64/`.
 
 | Area | Result |
 |---|---|
