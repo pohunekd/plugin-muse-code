@@ -15,6 +15,7 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 ROOT="${CAPTURE_ROOT:-$REPO_DIR/.capture}"
 OUT="$REPO_DIR/compat"
+PLATFORM="$(uname -s)"
 DRY_RUN=0
 INSTALLER_URL="${MUSE_INSTALLER_URL:-https://dev.meta.ai/install.sh}"
 # Terminal widths of the screen captures; the issue's contract is 20 to 200.
@@ -46,10 +47,15 @@ LONG_STRING_FILTER='walk(if type == "string" and length > 80 then "<" + (length 
 HOST_FIELD_FILTER='walk(if type == "object" then with_entries(select(.key | test("free_bytes|^pid$|_pid$") | not)) else . end)'
 
 STEPS_ALL=(install version login trust turn update-notice hooks sessions stub)
+# macOS has no namespaces, no socat and no hook-side jq: the screen and OSC
+# steps only.
+if [[ "$PLATFORM" == Darwin ]]; then
+  STEPS_ALL=(install version login trust turn update-notice)
+fi
 
 usage() {
   cat <<'EOF'
-usage: scripts/capture [--dry-run] [--root DIR] <step>...
+usage: scripts/capture [--dry-run] [--root DIR] [--out DIR] <step>...
 
 steps:
   install        install the CLI into <root>/fakehome with the official installer
@@ -79,18 +85,29 @@ log() {
 
 require_tools() {
   local tool missing=0
-  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip mount hostname; do
+  local tools=(tmux curl sed awk jq sha256sum git ps stat mkfifo find grep)
+  if [[ "$PLATFORM" == Darwin ]]; then
+    tools+=(sandbox-exec)
+    # The kit relies on GNU sed, stat, find and date.
+    sed --version 2>&1 | grep -q GNU || { log "GNU sed is required"; missing=1; }
+  else
+    tools+=(unshare socat ip mount hostname)
+  fi
+  for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       log "missing tool: $tool"
       missing=1
     fi
   done
-  if command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
+  if [[ "$PLATFORM" != Darwin ]] && command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
     log "unshare lacks --map-user (util-linux 2.38 or later is required)"
     missing=1
   fi
   ((missing == 0)) || die "install the missing tools"
 }
+
+# Denies the network except loopback (macOS).
+SANDBOX_PROFILE='(version 1)(allow default)(deny network*)(allow network* (remote ip "localhost:*"))(allow network* (local ip "localhost:*"))'
 
 # --- paths -----------------------------------------------------------------
 
@@ -109,7 +126,10 @@ redact() {
   repl="/capture-root${pad}"
   local esc
   esc="$(printf '%s' "$ROOT" | sed -e 's/[][\\.*^$|&]/\\&/g')"
-  sed -e "s|${esc}|${repl}|g"
+  # macOS reports /private/tmp for /tmp; both spellings are replaced.
+  local alias_esc
+  alias_esc="$(printf '%s' "${ROOT#/private}" | sed -e 's/[][\\.*^$|&]/\\&/g')"
+  sed -e "s|${esc}|${repl}|g" -e "s|${alias_esc}|${repl}|g"
 }
 
 # Writes stdin to $1, redacted, creating the directory.
@@ -147,6 +167,10 @@ prepare_scn() {
     for kv in "$@"; do
       printf '  %q \\\n' "$kv"
     done
+    if [[ "$PLATFORM" == Darwin ]]; then
+      # Keeps the macOS Keychain out of the captures.
+      printf '  TBH_CREDENTIAL_BACKEND=file \\\n'
+    fi
     printf '  %q "$@"\n' "$(bin_dir)/muse"
   } >"$s/run"
   chmod +x "$s/run"
@@ -320,7 +344,8 @@ step_home_layout() {
   rm -rf "$ROOT/s/home-layout"
   mkdir -p "$ws" "$ROOT/fakehome-default"
   git -C "$ws" init -q .
-  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
+  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null ||
+    cp -a "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
   rm -rf "$ROOT/fakehome-default/.config" "$ROOT/fakehome-default/.local/share"
   local run="$ROOT/s/home-layout/run"
   {
@@ -756,6 +781,11 @@ main() {
         ROOT="$1"
         shift
         ;;
+      --out)
+        (($# > 0)) || die "--out needs a directory"
+        OUT="$1"
+        shift
+        ;;
       -h | --help)
         usage
         exit 0
@@ -781,7 +811,24 @@ main() {
   # root is bound to a fixed path, the hook scripts are copied into it, a
   # synthetic passwd/group names the caller `capture`, and the
   # CLI runs under the caller's uid in a nested user namespace.
-  if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
+  if [[ "$PLATFORM" == Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
+    # No namespaces on macOS: the steps run under a sandbox profile that denies
+    # all network access except loopback.
+    local mrest=()
+    for arg in "${steps[@]}"; do
+      if [[ "$arg" == install ]]; then
+        step_install
+      else
+        mrest+=("$arg")
+      fi
+    done
+    ((${#mrest[@]} > 0)) || exit 0
+    CAPTURE_IN_NETNS=1 CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+      CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
+      exec sandbox-exec -p "$SANDBOX_PROFILE" \
+      bash "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "${mrest[@]}"
+  fi
+  if [[ "$PLATFORM" != Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
     local rest=()
     for arg in "${steps[@]}"; do
       if [[ "$arg" == install ]]; then
@@ -795,9 +842,9 @@ main() {
       CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
       CAPTURE_UID="$(id -u)" CAPTURE_GID="$(id -g)" \
       exec unshare --user --map-root-user --net --mount --uts \
-      bash "$SCRIPT_DIR/capture" --root "$ROOT" "${rest[@]}"
+      bash "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "${rest[@]}"
   fi
-  if [[ "${CAPTURE_NS_STAGE:-}" == outer ]]; then
+  if [[ "$PLATFORM" != Darwin && "${CAPTURE_NS_STAGE:-}" == outer ]]; then
     ip link set lo up
     hostname capture
     mount -t tmpfs tmpfs /run
@@ -809,7 +856,7 @@ main() {
     mount --bind /run/passwd /etc/passwd
     mount --bind /run/group /etc/group
     CAPTURE_NS_STAGE=inner exec unshare --user --map-user="$CAPTURE_UID" --map-group="$CAPTURE_GID" \
-      bash "$SCRIPT_DIR/capture" --root /run/capture-root "${steps[@]}"
+      bash "$SCRIPT_DIR/capture" --root /run/capture-root --out "$OUT" "${steps[@]}"
   fi
   assert_isolated
   # The hook scripts live under the bound root, so no hooks.json holds a host path.
@@ -832,6 +879,13 @@ main() {
 
 # assert_isolated: only a loopback interface exists and no host path is mapped.
 assert_isolated() {
+  if [[ "$PLATFORM" == Darwin ]]; then
+    # Outbound network must fail under the sandbox profile.
+    if curl -sS --max-time 5 -o /dev/null https://dev.meta.ai 2>/dev/null; then
+      die "network is reachable inside the sandbox"
+    fi
+    return 0
+  fi
   local links
   links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
   [[ "$links" == "lo " ]] || die "network namespace is not loopback-only: $links"
