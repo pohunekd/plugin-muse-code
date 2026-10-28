@@ -87,7 +87,7 @@ require_tools() {
   local tool missing=0
   local tools=(tmux curl sed awk perl jq sha256sum git ps stat mkfifo find grep)
   if [[ "$PLATFORM" == Darwin ]]; then
-    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc)
+    tools+=(sandbox-exec dscacheutil ioreg scutil nc security)
     ((BASH_VERSINFO[0] >= 4)) || { log "bash 4 or later must come first on the PATH"; missing=1; }
     # The kit relies on GNU sed, stat, find and date.
     for tool in sed stat find date; do
@@ -114,15 +114,17 @@ require_tools() {
 
 # sandbox_profile: macOS sandbox profile. It denies all network access, allows
 # unix sockets only below the capture root (tmux), and denies the mach services
-# that resolve names or hand a URL to the user's browser. Name resolution is
-# probed in assert_isolated; the Keychain is not blocked (a lookup still answers
-# inside), so the credential backend is forced to a file instead.
+# that resolve names, reach the Security server or hand a URL to the user's
+# browser, plus the Keychain files of the real user. assert_isolated probes
+# name resolution, loopback, the resolver socket and a throwaway keychain; the
+# LaunchServices and `open` denies are not probed.
 sandbox_profile() {
-  [[ "$ROOT" != *[\"\\]* ]] || die "--root must not contain quotes or backslashes"
+  [[ "$ROOT$HOME" != *[\"\\]* ]] || die "--root and HOME must not contain quotes or backslashes"
   printf '%s' '(version 1)(allow default)(deny network*)'
   printf '(allow network-bind (local unix-socket (subpath "%s")))' "$ROOT"
   printf '(allow network-outbound (remote unix-socket (subpath "%s")))' "$ROOT"
-  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
+  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|SecurityServer|secd|securityd|security[.]|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
+  printf '(deny file-read* file-write* (subpath "%s/Library/Keychains") (subpath "/Library/Keychains"))' "$HOME"
 }
 
 # --- paths -----------------------------------------------------------------
@@ -200,7 +202,7 @@ prepare_scn() {
       printf '  %q \\\n' "$kv"
     done
     if [[ "$PLATFORM" == Darwin ]]; then
-      # The file backend; the sandbox does not block the Keychain.
+      # The file backend; the profile also denies the Keychain.
       printf '  TBH_CREDENTIAL_BACKEND=file \\\n'
     fi
     printf '  %q "$@"\n' "$(bin_dir)/muse"
@@ -844,10 +846,10 @@ dry_run() {
 }
 
 # darwin_run_sandboxed <steps...>: records what works outside the sandbox
-# (name resolution, a loopback connection) so the inside
+# (name resolution, a loopback connection, a keychain item) so the inside
 # checks mean something, then runs the steps under the profile.
 darwin_run_sandboxed() {
-  local resolves="" loop="" port=18091 pid rc=0 ids
+  local resolves="" loop="" keychain="" kc="$ROOT/probe.keychain-db" port=18091 pid rc=0 ids
   dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address' && resolves=resolves
   nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
   pid=$!
@@ -855,13 +857,20 @@ darwin_run_sandboxed() {
   nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && loop=connects
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  # A throwaway keychain with one item: it answers outside the sandbox, so a
+  # failure inside shows the Security services are unreachable, not an absent item.
+  security delete-keychain "$kc" >/dev/null 2>&1 || true
+  rm -f "$kc"
+  security create-keychain -p capture-probe "$kc" >/dev/null 2>&1 || true
+  security add-generic-password -A -s capture-probe-item -a probe -w probe-value "$kc" >/dev/null 2>&1 || true
+  security find-generic-password -s capture-probe-item "$kc" >/dev/null 2>&1 && keychain=answers
   ids="$(darwin_identity_values)"
   nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
   pid=$!
   sleep 1
   mkdir -p "$ROOT/tmux"
   TMUX_TMPDIR="$ROOT/tmux" CAPTURE_DNS_CONTROL="$resolves" CAPTURE_LOOP_CONTROL="$loop" \
-    CAPTURE_LOOP_PORT="$port" CAPTURE_IN_NETNS=1 \
+    CAPTURE_LOOP_PORT="$port" CAPTURE_KEYCHAIN_CONTROL="$keychain" CAPTURE_KEYCHAIN_PATH="$kc" CAPTURE_IN_NETNS=1 \
     CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
     CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
     CAPTURE_HOST_IDS="$ids" \
@@ -869,6 +878,8 @@ darwin_run_sandboxed() {
     "$BASH" "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "$@" || rc=$?
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
+  security delete-keychain "$kc" >/dev/null 2>&1 || true
+  rm -f "$kc"
   return "$rc"
 }
 
@@ -995,7 +1006,8 @@ assert_isolated() {
   if [[ "$PLATFORM" == Darwin ]]; then
     # Each probe is compared with the unsandboxed control taken before the
     # sandbox started, so a probe that fails everywhere proves nothing.
-    [[ "${CAPTURE_DNS_CONTROL:-}" == resolves && "${CAPTURE_LOOP_CONTROL:-}" == connects ]] ||
+    [[ "${CAPTURE_DNS_CONTROL:-}" == resolves && "${CAPTURE_LOOP_CONTROL:-}" == connects &&
+      "${CAPTURE_KEYCHAIN_CONTROL:-}" == answers ]] ||
       die "no unsandboxed control for the isolation probes"
     if dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address'; then
       die "names resolve inside the sandbox"
@@ -1005,6 +1017,9 @@ assert_isolated() {
     fi
     if nc -z -w 2 -U /var/run/mDNSResponder >/dev/null 2>&1; then
       die "the resolver socket is reachable inside the sandbox"
+    fi
+    if security find-generic-password -s capture-probe-item "${CAPTURE_KEYCHAIN_PATH:?}" >/dev/null 2>&1; then
+      die "a keychain item can be read inside the sandbox"
     fi
     return 0
   fi
