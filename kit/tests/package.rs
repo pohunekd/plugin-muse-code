@@ -63,7 +63,10 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
         &LaunchProgram::Fixed("muse".to_owned())
     );
     assert_eq!(definition.default_args(), ["--trust-workspace"]);
-    assert!(definition.prompt_arg(), "`muse \"<prompt>\"` seeds a turn");
+    assert!(
+        !definition.prompt_arg(),
+        "the prompt is typed once the composer is drawn"
+    );
     assert_eq!(
         definition.launch_env(),
         [("MUSE_NO_AUTO_UPDATE".to_owned(), "1".to_owned())]
@@ -154,7 +157,10 @@ fn the_process_matchers_accept_the_captured_process_and_nothing_else() {
     }
     let image = "/home/u/.local/bin/muse-bin-1.4.14-R7309.1";
     assert!(matchers.matches(&process("sh", &[image, "--trust-workspace"])));
-    assert!(matchers.matches(&process("bash", &["/home/u/.local/bin/muse", "resume"])));
+    assert!(matchers.matches(&process(
+        "bash",
+        &["bash", "/home/u/.local/bin/muse", "resume"]
+    )));
     for (comm, cmdline) in [
         ("musescore", &["musescore"][..]),
         ("amuse", &["/usr/bin/amuse"][..]),
@@ -363,17 +369,17 @@ fn the_terminal_title_reads_working_only_behind_a_spinner_frame() {
 }
 
 #[test]
-fn the_footer_alone_is_the_idle_fallback_and_a_stray_footer_phrase_is_not() {
+fn prose_that_quotes_a_footer_or_a_dialog_reads_nothing() {
     let definition = installed_definition();
     let rule = "\u{2500}".repeat(40);
-    let footer_only =
-        format!("some output\n{rule}\n{rule}\n  echo \u{b7} /ws \u{b7} Auto-review\n");
-    assert_eq!(
-        screen_activity(&definition, &footer_only, 80),
-        Some(AgentActivity::Idle)
-    );
-    let prose = "the profile is Auto-review\nand that is all\n";
-    assert_eq!(screen_activity(&definition, prose, 80), None);
+    for text in [
+        "the profile \u{b7} read-only is described\nin this text\n".to_owned(),
+        format!("{rule}\nDo you trust this workspace? Trust and continue\n\u{276f}\n{rule}\n"),
+        "Log in with browser, then Set an API key\n\u{276f} explain this\n".to_owned(),
+    ] {
+        let read = screen_activity(&definition, &text, 80);
+        assert_ne!(read, Some(AgentActivity::Blocked), "{text:?}");
+    }
 }
 
 #[test]

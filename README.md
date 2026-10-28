@@ -76,14 +76,14 @@ A new Muse release is captured by re-running the kit before the lock moves:
 The plugin is not in the plugin index yet. Install it from a checkout:
 
 ```bash
-cargo xtask package build package --output muse.tar.zst   # in zajca/pohunek
-pohunek plugin install ./muse.tar.zst --sha256 sha256:<digest>
+cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
+pohunek plugin install ./muse.tar.zst --sha256 sha256:<digest> --yes
 pohunek plugin enable pohunek.runtime.muse
 pohunek plugin select pohunek.runtime.muse
 pohunek session new --agent muse
 ```
 
-or, for development, `pohunek plugin link package` followed by `enable` and
+or, for development, `pohunek plugin link package --yes` followed by `enable` and
 `select`. Muse itself is installed by its own installer
 (`curl -fsSL https://dev.meta.ai/install.sh | sh`) and must be on the daemon's
 `PATH`; sign in once (`muse`), or set an API key, before a session can do
@@ -99,7 +99,7 @@ What the package does:
 - Reports `idle`, `working` and `blocked` from the screen (composer, status
   line, trust, sign-in, API-key, approval and question dialogs), from the
   terminal title, and from OSC 7501 records (`app=muse`, the probe is answered).
-- Holds the first prompt until the composer is drawn (`ready = "screen_idle"`).
+- Types the first prompt once the composer is drawn (`ready = "screen_idle"`); the prompt is not an argument, so a prompt such as `logout` never selects a subcommand.
 
 Limits:
 
@@ -117,7 +117,7 @@ Limits:
 ```bash
 (cd kit && cargo test --locked)          # descriptor, version, process, screens, titles
 scripts/smoke --root /path/to/scratch \
-  --core-bin /path/to/core/target/debug --muse-dir ~/.local/bin   # needs the Muse install in `compat/RELEASE`
+  --core-bin /path/to/core/target/debug --muse-dir /path/to/muse/install   # the release in `compat/RELEASE`
 ```
 
 `kit/` pins the core revision it is proven against (`kit/Cargo.toml`) and the
@@ -174,7 +174,7 @@ unverified.
 - The terminal-side update banner driven by the release manifest (`urgency`,
   `notification_text`); the launcher's own update notice is captured.
 - That `MUSE_NO_AUTO_UPDATE=1` leaves the network untouched for the binary itself (the launcher part is read from its source and observed; the namespace has no route, so an attempt would fail silently).
-- The update-notice rule `launcher_update_notice` (the launcher line only; no TUI screen with a notice was captured) and the footer-only idle fallback (synthetic screens).
+- The update-notice rule `launcher_update_notice` (the launcher line only; no TUI screen with a notice was captured).
 - Any macOS behaviour of the package (P4).
 
 Prior art cited by the plan (agent-deck, par-term, Zentty, Paradev, t3code,

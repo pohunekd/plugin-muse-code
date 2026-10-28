@@ -19,7 +19,9 @@ program = "muse"
 # outside Muse's sandbox.
 args = ["--trust-workspace"]
 detect_manifest = "detect.toml"
-prompt_arg = true
+# Typed into the composer once it is drawn: a positional argument would let a
+# prompt such as `logout` select a subcommand.
+prompt_arg = false
 # `muse --version` prints `Muse Code <release> (<release>-R<n>.<m>)` on stdout;
 # the leading release is the one compared, the parenthesised id is the
 # annotation.

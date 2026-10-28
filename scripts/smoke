@@ -29,6 +29,13 @@ POLL_SECONDS=0.5
 # Delay Muse's echo provider adds to a turn so `working` is observable.
 ECHO_DELAY_MS=4000
 PROMPT="smoke prompt"
+# Initial-input acknowledgement window, and the poll interval and attempts used
+# to catch the short `working` phase of a delayed echo turn.
+INPUT_ACK_MS=8000
+FAST_POLL_SECONDS=0.25
+WORKING_POLLS=$((WAIT_SECONDS * 4))
+# Bound on waiting for the daemon after teardown.
+REAP_SECONDS=10
 
 ROOT="" CORE_BIN="" MUSE_DIR=""
 DAEMON_PID=""
@@ -86,7 +93,12 @@ chmod 700 "$HOME_DIR/.config/pohunek" "$HOME_DIR/.config/pohunek/agents"
 
 # The release is copied once; its version file and launcher hash are compared
 # after the run.
-cp --reflink=auto -a "$MUSE_DIR/." "$HOME_DIR/.local/bin/"
+release="$(<"$MUSE_DIR/.muse-version")"
+[[ "$release" == "$(<"$REPO/compat/RELEASE")" ]] || die "$MUSE_DIR holds Muse $release, compat/RELEASE locks $(<"$REPO/compat/RELEASE")"
+for f in muse .muse-version .muse-release-info.json "muse-bin-$release"; do
+  [[ -e "$MUSE_DIR/$f" ]] || die "$MUSE_DIR/$f is missing"
+  cp --reflink=auto -a "$MUSE_DIR/$f" "$HOME_DIR/.local/bin/"
+done
 before_version="$(<"$HOME_DIR/.local/bin/.muse-version")"
 before_launcher="$(sha256sum "$HOME_DIR/.local/bin/muse" | cut -d' ' -f1)"
 install_listing() { find "$1" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' '; }
@@ -114,7 +126,17 @@ teardown() {
       kill "$pid" 2>/dev/null || true
     done
   fi
-  [[ -z "$DAEMON_PID" ]] || wait "$DAEMON_PID" 2>/dev/null || true
+  if [[ -n "$DAEMON_PID" ]]; then
+    # Without a verified namespace only the job this script started is signalled.
+    [[ -n "$NETNS" ]] || kill "$DAEMON_PID" 2>/dev/null || true
+    local i
+    for ((i = 0; i < REAP_SECONDS * 2; i++)); do
+      kill -0 "$DAEMON_PID" 2>/dev/null || break
+      sleep "$POLL_SECONDS"
+    done
+    kill -0 "$DAEMON_PID" 2>/dev/null && kill -9 "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+  fi
   if ((status == 0)); then
     log "PASS"
   else
@@ -151,9 +173,10 @@ wait_for "the isolated daemon" pk health
 socket="$RT_DIR/pohunek/daemon.sock"
 [[ -S "$socket" ]] || die "no daemon socket at $socket"
 # `unshare` and `env` exec in place, so the background job is the daemon.
-NETNS="$(readlink "/proc/$DAEMON_PID/ns/net")"
-[[ -n "$NETNS" ]] || die "cannot find the daemon process"
-[[ "$NETNS" != "$(readlink /proc/self/ns/net)" ]] || die "the daemon shares the host network namespace"
+daemon_netns="$(readlink "/proc/$DAEMON_PID/ns/net")"
+[[ -n "$daemon_netns" ]] || die "cannot find the daemon process"
+[[ "$daemon_netns" != "$(readlink /proc/self/ns/net)" ]] || die "the daemon shares the host network namespace"
+NETNS="$daemon_netns"
 log "daemon is up in $NETNS (host: $(readlink /proc/self/ns/net))"
 
 # --- package under a development id --------------------------------------
@@ -198,7 +221,7 @@ pk session stop "$(session_id bare)" >/dev/null
 
 # --- 2. echo turn: composer ready, input accepted, working then idle ------
 pk session new --agent muse-echo --cwd "$WS" --name echo --input "$PROMPT" \
-  --input-ack-timeout-ms 8000 --yes --json >"$ROOT/echo-new.json"
+  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/echo-new.json"
 [[ "$(jq -r '.ok.prompt_delivered' "$ROOT/echo-new.json")" == "true" ]] || die "the initial input did not start a turn"
 echo_id="$(jq -r '.ok.id' "$ROOT/echo-new.json")"
 reply_seen() { pk session screen "$echo_id" | grep -q "echo: $PROMPT"; }
@@ -210,11 +233,11 @@ log "echo turn: input reached the composer, reply rendered, activity idle"
 # working is observed while the delayed echo runs.
 pk session input "$echo_id" "second turn" >/dev/null
 seen_working=""
-for ((i = 0; i < WAIT_SECONDS * 4; i++)); do
+for ((i = 0; i < WORKING_POLLS; i++)); do
   case "$(activity_of echo)" in
     working) seen_working=1; break ;;
   esac
-  sleep 0.25
+  sleep "$FAST_POLL_SECONDS"
 done
 [[ -n "$seen_working" ]] || die "the second turn never read working"
 second_seen() { pk session screen "$echo_id" | grep -q 'echo: second turn'; }

@@ -12,6 +12,7 @@
 comm = ['^muse(-bin(-[0-9][0-9A-Za-z.-]*)?)?$']
 cmdline = [
   '^(\S*/)?muse($| )',
+  '^(\S*/)?bash (\S*/)?muse($| )',
   '^(\S*/)?muse-bin-[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?($| )',
 ]
 
@@ -70,8 +71,10 @@ regex = [
   '(?i)do\s+you\s+trust\s+this\s+work',
   '(?i)trust\s+and\s+con',
 ]
+not = { line_regex = ['^\s*\x{276F}'] }
 
-# Sign-in choice: `Log in with browser` / `Set an API key`. Enter on the first
+# Sign-in choice (like the other first-run dialogs, only read while no
+# composer is drawn, so a transcript that quotes it stays unblocked): `Log in with browser` / `Set an API key`. Enter on the first
 # entry starts a device-code request at Meta.
 [[rules]]
 id = "login_choice"
@@ -83,6 +86,7 @@ regex = [
   '(?i)log\s+in\s+with\s+browser',
   '(?i)set\s+an\s+api\s+key',
 ]
+not = { line_regex = ['^\s*\x{276F}'] }
 
 [[rules]]
 id = "api_key_prompt"
@@ -94,6 +98,7 @@ regex = [
   '(?i)paste\s+your\s+model\s+api\s+key',
   '(?i)enter\s+validate',
 ]
+not = { line_regex = ['^\s*\x{276F}'] }
 
 # Approval stage: the heading is paired with a grant entry. `Allow this stage
 # once` is captured; `Always allow in this workspace` is unverified (prior art
@@ -103,7 +108,7 @@ regex = [
 id = "approval_stage"
 state = "blocked"
 priority = 980
-region = "whole_recent"
+region = "prompt_box_body"
 visible_blocker = true
 regex = ['(?i)would\s+you\s+like\s+to\s+ru']
 all = [
@@ -135,16 +140,6 @@ state = "idle"
 priority = 950
 region = "prompt_box_body"
 line_regex = ['^\s*\x{276F}']
-
-# Fallback when no composer is recognised: the footer row below the last rule
-# line ends with the approval profile, `<model> · <cwd> · Auto-review`. Only
-# `Auto-review` is captured; the other profile names are unverified.
-[[rules]]
-id = "idle_footer"
-state = "idle"
-priority = 250
-region = "after_last_horizontal_rule"
-regex = ['(?i)\x{B7}\s*(auto-review|ask\s+me|read-only|unrestricted)\b']
 
 # The launcher prints `Muse Code updated <old> -> <new>` before it starts the
 # new binary; with `MUSE_NO_AUTO_UPDATE=1` it never appears. Any screen rule
