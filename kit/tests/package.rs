@@ -375,6 +375,7 @@ fn prose_that_quotes_a_footer_or_a_dialog_reads_nothing() {
     for text in [
         "the profile \u{b7} read-only is described\nin this text\n".to_owned(),
         format!("{rule}\nDo you trust this workspace? Trust and continue\n\u{276f}\n{rule}\n"),
+        "\u{276f} Enter to select \u{b7} \u{27e9} 1. a\n".to_owned(),
         "Log in with browser, then Set an API key\n\u{276f} explain this\n".to_owned(),
     ] {
         let read = screen_activity(&definition, &text, 80);

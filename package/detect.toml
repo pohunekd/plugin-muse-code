@@ -127,9 +127,11 @@ state = "blocked"
 priority = 980
 region = "whole_recent"
 visible_blocker = true
+# The footer starts its line and the selector `⟩ 1.` marks the entry, so a
+# prompt echo (`❯ ...`) that quotes the footer does not match.
 regex = [
-  '(?i)enter\s+to\s+select',
-  '(?i)tab\s+for\s+an\s+optional\s+note',
+  '(?im)^\s*enter\s+to\s+select\b',
+  '(?m)^\s*\x{27E9}\s+[0-9]+\.\s',
 ]
 
 # The composer is the prompt box body between the two rule lines. `❯` is the
