@@ -114,13 +114,14 @@ require_tools() {
 
 # sandbox_profile: macOS sandbox profile. It denies all network access, allows
 # unix sockets only below the capture root (tmux), and denies the mach services
-# that resolve names, reach the Keychain or open a URL in the user's browser.
+# that resolve names, the Keychain files and services, or open a URL in the user's browser.
 sandbox_profile() {
-  [[ "$ROOT" != *[\"\\]* ]] || die "--root must not contain quotes or backslashes"
+  [[ "$ROOT$HOME" != *[\"\\]* ]] || die "--root and HOME must not contain quotes or backslashes"
   printf '%s' '(version 1)(allow default)(deny network*)'
   printf '(allow network-bind (local unix-socket (subpath "%s")))' "$ROOT"
   printf '(allow network-outbound (remote unix-socket (subpath "%s")))' "$ROOT"
   printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|SecurityServer|secd|securityd|security[.]|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
+  printf '(deny file-read* file-write* (subpath "%s/Library/Keychains") (subpath "/Library/Keychains"))' "$HOME"
 }
 
 # --- paths -----------------------------------------------------------------
