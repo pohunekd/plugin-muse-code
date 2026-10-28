@@ -1,3 +1,4 @@
 /.capture/
 /logs/
 .env*
+/kit/target/
