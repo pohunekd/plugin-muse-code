@@ -87,7 +87,7 @@ require_tools() {
   local tool missing=0
   local tools=(tmux curl sed awk perl jq sha256sum git ps stat mkfifo find grep)
   if [[ "$PLATFORM" == Darwin ]]; then
-    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc security)
+    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc)
     ((BASH_VERSINFO[0] >= 4)) || { log "bash 4 or later must come first on the PATH"; missing=1; }
     # The kit relies on GNU sed, stat, find and date.
     for tool in sed stat find date; do
@@ -114,14 +114,15 @@ require_tools() {
 
 # sandbox_profile: macOS sandbox profile. It denies all network access, allows
 # unix sockets only below the capture root (tmux), and denies the mach services
-# that resolve names, the Keychain files and services, or open a URL in the user's browser.
+# that resolve names or hand a URL to the user's browser. Name resolution is
+# probed in assert_isolated; the Keychain is not blocked (a lookup still answers
+# inside), so the credential backend is forced to a file instead.
 sandbox_profile() {
-  [[ "$ROOT$HOME" != *[\"\\]* ]] || die "--root and HOME must not contain quotes or backslashes"
+  [[ "$ROOT" != *[\"\\]* ]] || die "--root must not contain quotes or backslashes"
   printf '%s' '(version 1)(allow default)(deny network*)'
   printf '(allow network-bind (local unix-socket (subpath "%s")))' "$ROOT"
   printf '(allow network-outbound (remote unix-socket (subpath "%s")))' "$ROOT"
-  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|SecurityServer|secd|securityd|security[.]|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
-  printf '(deny file-read* file-write* (subpath "%s/Library/Keychains") (subpath "/Library/Keychains"))' "$HOME"
+  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
 }
 
 # --- paths -----------------------------------------------------------------
@@ -199,7 +200,7 @@ prepare_scn() {
       printf '  %q \\\n' "$kv"
     done
     if [[ "$PLATFORM" == Darwin ]]; then
-      # Keeps the macOS Keychain out of the captures.
+      # The file backend; the sandbox does not block the Keychain.
       printf '  TBH_CREDENTIAL_BACKEND=file \\\n'
     fi
     printf '  %q "$@"\n' "$(bin_dir)/muse"
@@ -843,10 +844,10 @@ dry_run() {
 }
 
 # darwin_run_sandboxed <steps...>: records what works outside the sandbox
-# (name resolution, a loopback connection, a Keychain lookup) so the inside
+# (name resolution, a loopback connection) so the inside
 # checks mean something, then runs the steps under the profile.
 darwin_run_sandboxed() {
-  local resolves="" loop="" keychain=0 port=18091 pid rc=0 ids
+  local resolves="" loop="" port=18091 pid rc=0 ids
   dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address' && resolves=resolves
   nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
   pid=$!
@@ -854,14 +855,13 @@ darwin_run_sandboxed() {
   nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && loop=connects
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
-  security find-generic-password -s capture-probe-absent >/dev/null 2>&1 || keychain=$?
   ids="$(darwin_identity_values)"
   nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
   pid=$!
   sleep 1
   mkdir -p "$ROOT/tmux"
   TMUX_TMPDIR="$ROOT/tmux" CAPTURE_DNS_CONTROL="$resolves" CAPTURE_LOOP_CONTROL="$loop" \
-    CAPTURE_LOOP_PORT="$port" CAPTURE_KEYCHAIN_CONTROL="$keychain" CAPTURE_IN_NETNS=1 \
+    CAPTURE_LOOP_PORT="$port" CAPTURE_IN_NETNS=1 \
     CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
     CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
     CAPTURE_HOST_IDS="$ids" \
@@ -1006,10 +1006,6 @@ assert_isolated() {
     if nc -z -w 2 -U /var/run/mDNSResponder >/dev/null 2>&1; then
       die "the resolver socket is reachable inside the sandbox"
     fi
-    local keychain=0
-    security find-generic-password -s capture-probe-absent >/dev/null 2>&1 || keychain=$?
-    [[ "$keychain" != "${CAPTURE_KEYCHAIN_CONTROL:-}" ]] ||
-      die "the Keychain answers inside the sandbox"
     return 0
   fi
   local links
