@@ -6,8 +6,8 @@
 # the credential-free `--provider echo` provider. It never logs in, never
 # stores a credential and never calls a model.
 #
-# Requires: bash 4+, tmux, curl, sed, awk, jq, sha256sum, git, ps, socat, ip,
-# unshare. See README.md.
+# Requires: bash 4+, tmux, curl, sed, awk, perl, jq, sha256sum, git, ps, socat,
+# ip, unshare. See README.md.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +15,7 @@ REPO_DIR="$(dirname "$SCRIPT_DIR")"
 
 ROOT="${CAPTURE_ROOT:-$REPO_DIR/.capture}"
 OUT="$REPO_DIR/compat"
+PLATFORM="$(uname -s)"
 DRY_RUN=0
 INSTALLER_URL="${MUSE_INSTALLER_URL:-https://dev.meta.ai/install.sh}"
 # Terminal widths of the screen captures; the issue's contract is 20 to 200.
@@ -46,10 +47,15 @@ LONG_STRING_FILTER='walk(if type == "string" and length > 80 then "<" + (length 
 HOST_FIELD_FILTER='walk(if type == "object" then with_entries(select(.key | test("free_bytes|^pid$|_pid$") | not)) else . end)'
 
 STEPS_ALL=(install version login trust turn update-notice hooks sessions stub)
+# macOS has no namespaces, no socat and no hook-side jq: the screen and OSC
+# steps only.
+if [[ "$PLATFORM" == Darwin ]]; then
+  STEPS_ALL=(install version login trust turn update-notice)
+fi
 
 usage() {
   cat <<'EOF'
-usage: scripts/capture [--dry-run] [--root DIR] <step>...
+usage: scripts/capture [--dry-run] [--root DIR] [--out DIR] <step>...
 
 steps:
   install        install the CLI into <root>/fakehome with the official installer
@@ -79,17 +85,44 @@ log() {
 
 require_tools() {
   local tool missing=0
-  for tool in tmux curl sed awk jq sha256sum git ps stat mkfifo find grep unshare socat ip mount hostname; do
+  local tools=(tmux curl sed awk perl jq sha256sum git ps stat mkfifo find grep)
+  if [[ "$PLATFORM" == Darwin ]]; then
+    tools+=(sandbox-exec dscacheutil dscl ioreg scutil nc)
+    ((BASH_VERSINFO[0] >= 4)) || { log "bash 4 or later must come first on the PATH"; missing=1; }
+    # The kit relies on GNU sed, stat, find and date.
+    for tool in sed stat find date; do
+      if ! { command -v "$tool" >/dev/null 2>&1 && "$tool" --version 2>&1 | grep -q GNU; }; then
+        log "GNU $tool is required"
+        missing=1
+      fi
+    done
+  else
+    tools+=(unshare socat ip mount hostname)
+  fi
+  for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
       log "missing tool: $tool"
       missing=1
     fi
   done
-  if command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
+  if [[ "$PLATFORM" != Darwin ]] && command -v unshare >/dev/null 2>&1 && ! unshare --help 2>&1 | grep -q -- '--map-user'; then
     log "unshare lacks --map-user (util-linux 2.38 or later is required)"
     missing=1
   fi
   ((missing == 0)) || die "install the missing tools"
+}
+
+# sandbox_profile: macOS sandbox profile. It denies all network access, allows
+# unix sockets only below the capture root (tmux), and denies the mach services
+# that resolve names or hand a URL to the user's browser. Name resolution is
+# probed in assert_isolated; the Keychain is not blocked (a lookup still answers
+# inside), so the credential backend is forced to a file instead.
+sandbox_profile() {
+  [[ "$ROOT" != *[\"\\]* ]] || die "--root must not contain quotes or backslashes"
+  printf '%s' '(version 1)(allow default)(deny network*)'
+  printf '(allow network-bind (local unix-socket (subpath "%s")))' "$ROOT"
+  printf '(allow network-outbound (remote unix-socket (subpath "%s")))' "$ROOT"
+  printf '%s' '(deny mach-lookup (global-name-regex #"^com[.]apple[.](mDNSResponder|dnssd|SystemConfiguration|coreservices[.]launchservicesd|lsd[.]|nsurlsessiond)"))(deny process-exec (literal "/usr/bin/open"))'
 }
 
 # --- paths -----------------------------------------------------------------
@@ -107,9 +140,28 @@ redact() {
   ((${#ROOT} >= 13)) || die "--root must be at least 13 characters long"
   pad="$(printf '%*s' $((${#ROOT} - 13)) '' | tr ' ' '_')"
   repl="/capture-root${pad}"
-  local esc
-  esc="$(printf '%s' "$ROOT" | sed -e 's/[][\\.*^$|&]/\\&/g')"
-  sed -e "s|${esc}|${repl}|g"
+  # macOS reports /private/tmp for /tmp; both spellings are replaced. The CLI
+  # wraps a long path across rows at narrow widths, so a match may contain a
+  # line break and the indentation after it; those characters are kept and
+  # the placeholder fills the others, which preserves the screen layout.
+  perl -0777 -e '
+    my ($root, $alias, $ph) = @ARGV;
+    local $/;
+    my $text = <STDIN>;
+    for my $needle (grep { length } ($root, $alias)) {
+      my $re = join(q{(?:\n[ ]*)?}, map { quotemeta } split //, $needle);
+      $text =~ s{$re}{
+        my ($m, $i, $gap, $out) = ($&, 0, 0, q{});
+        for my $c (split //, $m) {
+          if ($c eq "\n") { $gap = 1; $out .= $c }
+          elsif ($c eq q{ } && $gap) { $out .= $c }
+          else { $gap = 0; $out .= substr($ph, $i++, 1) }
+        }
+        $out
+      }ge;
+    }
+    print $text;
+  ' -- "$ROOT" "${ROOT#/private}" "$repl"
 }
 
 # Writes stdin to $1, redacted, creating the directory.
@@ -147,6 +199,10 @@ prepare_scn() {
     for kv in "$@"; do
       printf '  %q \\\n' "$kv"
     done
+    if [[ "$PLATFORM" == Darwin ]]; then
+      # The file backend; the sandbox does not block the Keychain.
+      printf '  TBH_CREDENTIAL_BACKEND=file \\\n'
+    fi
     printf '  %q "$@"\n' "$(bin_dir)/muse"
   } >"$s/run"
   chmod +x "$s/run"
@@ -313,6 +369,19 @@ step_version() {
   done
 }
 
+# credential_record <data root>: the credential backend the first session
+# reports, as `credential_backend` and `keychain_fallback_reason`.
+credential_record() {
+  local f
+  f="$(find "$1/sessions" -name session.jsonl 2>/dev/null | sort | head -n 1)"
+  [[ -n "$f" ]] || die "no session record under ${1#"$ROOT"/}"
+  jq -ce 'select(.payload_type == "session.opened.observed")
+    | .payload.record | {credential_backend, keychain_fallback_reason}
+    | select(.credential_backend == "file")' "$f" | head -n 1 | grep . ||
+    die "the session did not report the file credential backend"
+
+}
+
 # Writes the default-HOME layout evidence: where an unauthenticated start puts
 # its files when no XDG variable is set.
 step_home_layout() {
@@ -320,13 +389,18 @@ step_home_layout() {
   rm -rf "$ROOT/s/home-layout"
   mkdir -p "$ws" "$ROOT/fakehome-default"
   git -C "$ws" init -q .
-  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
+  cp -a --reflink=auto "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null ||
+    cp -a "$(home_dir)/." "$ROOT/fakehome-default/" 2>/dev/null || true
   rm -rf "$ROOT/fakehome-default/.config" "$ROOT/fakehome-default/.local/share"
   local run="$ROOT/s/home-layout/run"
   {
     printf '#!/bin/bash\n'
-    printf 'exec env -i HOME=%q PATH=/usr/bin:/bin TERM=xterm-256color MUSE_NO_AUTO_UPDATE=1 %q "$@"\n' \
-      "$ROOT/fakehome-default" "$ROOT/fakehome-default/.local/bin/muse"
+    printf 'exec env -i HOME=%q PATH=/usr/bin:/bin TERM=xterm-256color MUSE_NO_AUTO_UPDATE=1 \\\n' \
+      "$ROOT/fakehome-default"
+    if [[ "$PLATFORM" == Darwin ]]; then
+      printf '  TBH_CREDENTIAL_BACKEND=file \\\n'
+    fi
+    printf '  %q "$@"\n' "$ROOT/fakehome-default/.local/bin/muse"
   } >"$run"
   chmod +x "$run"
   TMUX_SOCKET="muse-capture-$$"
@@ -334,9 +408,18 @@ step_home_layout() {
   : >"$RAW_FILE"
   tm kill-server 2>/dev/null || true
   tm new-session -d -x 120 -y "$HEIGHT" -c "$ws" "$(printf '%q ' "$run" --provider echo --trust-workspace)"
-  pty_idle || true
-  pty_submit 'hello' 'echo: hello' || true
+  # Enter is only sent once the composer is shown; on a login screen it would
+  # select the browser sign-in entry.
+  if pty_idle && pty_submit 'hello' 'echo: hello'; then
+    sleep 2
+  else
+    log "home-layout turn did not complete"
+  fi
   pty_stop
+  if [[ "$PLATFORM" == Darwin ]]; then
+    credential_record "$ROOT/fakehome-default/.local/share/muse" |
+      emit "$OUT/sessions/credential-backend-default-home.txt"
+  fi
   (cd "$ROOT/fakehome-default" && find .config .local/share -maxdepth 3 \
     -not -path '*/plugins/*' -not -path '*/skills/*' -not -path '*/local-tracing/*' | sort) |
     emit "$OUT/sessions/default-home-tree.txt"
@@ -396,8 +479,13 @@ turn_at() {
   if [[ "$w" == 120 && "$snap" == snap ]]; then
     # The launcher execs the versioned binary, so the pane process is the
     # binary itself.
-    ps -o comm=,args= -p "$(tm display-message -p -t 0 '#{pane_pid}')" |
-      emit "$OUT/install/process.txt"
+    # macOS refuses ps inside the sandbox profile; the file is then absent.
+    if ! ps -o comm=,args= -p "$(tm display-message -p -t 0 '#{pane_pid}')" 2>/dev/null |
+      emit "$OUT/install/process.txt" || [[ ! -s "$OUT/install/process.txt" ]]; then
+      [[ "$PLATFORM" == Darwin ]] || die "ps failed"
+      log "ps is refused inside the sandbox; install/process.txt is not captured"
+      rm -f "$OUT/install/process.txt"
+    fi
   fi
   # With the reply delayed, the first visible result of a submit is the
   # working state.
@@ -430,6 +518,9 @@ step_turn() {
   done
   # Raw first bytes: the queries the CLI sends at startup.
   head -c 400 "$(scn_dir turn)/raw.bin" | visible | emit "$OUT/osc7501/startup-queries.txt"
+  if [[ "$PLATFORM" == Darwin ]]; then
+    credential_record "$(scn_dir turn)/data/muse" | emit "$OUT/sessions/credential-backend-turn.txt"
+  fi
 }
 
 step_update_notice() {
@@ -439,7 +530,7 @@ step_update_notice() {
   prepare_scn update-notice
   printf '1.4.0-R1\t%s\n' "$(cat "$b/.muse-version")" >"$notice"
   pty_start update-notice 120 "$(scn_dir update-notice)/ws" --provider echo --trust-workspace
-  pty_wait 'Muse Code updated|❯' || true
+  pty_wait '❯' || true
   visible <"$RAW_FILE" | head -c 600 | emit "$OUT/screens/update-notice/raw-head.txt"
   pty_snap "$OUT/screens/update-notice/120.txt"
   pty_stop
@@ -738,10 +829,47 @@ dry_run() {
   sample="$(printf '%s/x' "$ROOT" | redact)"
   [[ "${#sample}" -eq $((${#ROOT} + 2)) ]] || die "redaction changed the width"
   [[ "$sample" != *"$ROOT"* ]] || die "redaction left the root in place"
+  # A root wrapped across rows with indentation is redacted too.
+  local cut=$((${#ROOT} / 2)) wrapped
+  wrapped="$(printf '%s\n  %s' "${ROOT:0:cut}" "${ROOT:cut}" | redact | tr -d ' \n')"
+  [[ "$wrapped" != *"${ROOT:0:cut}"* && "$wrapped" != *"${ROOT:cut}"* ]] ||
+    die "redaction left a wrapped root in place"
+  # The alias without the /private prefix is redacted too.
+  sample="$(printf '%s/x' "${ROOT#/private}" | redact)"
+  [[ "$sample" != *"${ROOT#/private}"* ]] || die "redaction left the root alias in place"
   bash -n "$SCRIPT_DIR/capture"
   bash -n "$SCRIPT_DIR/hook-log"
   bash -n "$SCRIPT_DIR/model-stub"
   printf 'dry run ok\n'
+}
+
+# darwin_run_sandboxed <steps...>: records what works outside the sandbox
+# (name resolution, a loopback connection) so the inside
+# checks mean something, then runs the steps under the profile.
+darwin_run_sandboxed() {
+  local resolves="" loop="" port=18091 pid rc=0 ids
+  dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address' && resolves=resolves
+  nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  sleep 1
+  nc -z -w 2 127.0.0.1 "$port" >/dev/null 2>&1 && loop=connects
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  ids="$(darwin_identity_values)"
+  nc -l 127.0.0.1 "$port" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  sleep 1
+  mkdir -p "$ROOT/tmux"
+  TMUX_TMPDIR="$ROOT/tmux" CAPTURE_DNS_CONTROL="$resolves" CAPTURE_LOOP_CONTROL="$loop" \
+    CAPTURE_LOOP_PORT="$port" CAPTURE_IN_NETNS=1 \
+    CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+    CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
+    CAPTURE_HOST_IDS="$ids" \
+    sandbox-exec -p "$(sandbox_profile)" \
+    "$BASH" "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "$@" || rc=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return "$rc"
 }
 
 main() {
@@ -754,6 +882,11 @@ main() {
       --root)
         (($# > 0)) || die "--root needs a directory"
         ROOT="$1"
+        shift
+        ;;
+      --out)
+        (($# > 0)) || die "--out needs a directory"
+        OUT="$1"
         shift
         ;;
       -h | --help)
@@ -769,6 +902,13 @@ main() {
     usage >&2
     exit 2
   }
+  if [[ "$PLATFORM" == Darwin ]]; then
+    for arg in "${steps[@]}"; do
+      case "$arg" in
+        hooks | sessions | stub) die "step $arg is not supported on macOS" ;;
+      esac
+    done
+  fi
   ROOT="$(mkdir -p "$ROOT" && cd "$ROOT" && pwd -P)"
   if ((DRY_RUN == 1)); then
     dry_run "${steps[@]}"
@@ -781,7 +921,24 @@ main() {
   # root is bound to a fixed path, the hook scripts are copied into it, a
   # synthetic passwd/group names the caller `capture`, and the
   # CLI runs under the caller's uid in a nested user namespace.
-  if [[ -z "${CAPTURE_IN_NETNS:-}" ]]; then
+  if [[ "$PLATFORM" == Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
+    # No namespaces on macOS: the steps run under a sandbox profile that denies
+    # all network access, including loopback.
+    local mrest=()
+    for arg in "${steps[@]}"; do
+      if [[ "$arg" == install ]]; then
+        step_install
+      else
+        mrest+=("$arg")
+      fi
+    done
+    ((${#mrest[@]} > 0)) || exit 0
+    # tmux sockets live below the root; a unix socket path holds 104 bytes.
+    ((${#ROOT} <= 60)) || die "--root is too long for tmux socket paths (60 characters at most)"
+    darwin_run_sandboxed "${mrest[@]}"
+    exit $?
+  fi
+  if [[ "$PLATFORM" != Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
     local rest=()
     for arg in "${steps[@]}"; do
       if [[ "$arg" == install ]]; then
@@ -795,9 +952,9 @@ main() {
       CAPTURE_HOST_USER="$(id -un)" CAPTURE_HOST_HOSTNAME="$(hostname)" \
       CAPTURE_UID="$(id -u)" CAPTURE_GID="$(id -g)" \
       exec unshare --user --map-root-user --net --mount --uts \
-      bash "$SCRIPT_DIR/capture" --root "$ROOT" "${rest[@]}"
+      bash "$SCRIPT_DIR/capture" --root "$ROOT" --out "$OUT" "${rest[@]}"
   fi
-  if [[ "${CAPTURE_NS_STAGE:-}" == outer ]]; then
+  if [[ "$PLATFORM" != Darwin && "${CAPTURE_NS_STAGE:-}" == outer ]]; then
     ip link set lo up
     hostname capture
     mount -t tmpfs tmpfs /run
@@ -809,8 +966,11 @@ main() {
     mount --bind /run/passwd /etc/passwd
     mount --bind /run/group /etc/group
     CAPTURE_NS_STAGE=inner exec unshare --user --map-user="$CAPTURE_UID" --map-group="$CAPTURE_GID" \
-      bash "$SCRIPT_DIR/capture" --root /run/capture-root "${steps[@]}"
+      bash "$SCRIPT_DIR/capture" --root /run/capture-root --out "$OUT" "${steps[@]}"
   fi
+  # tmux sockets live below the root, the only place the macOS profile allows.
+  mkdir -p "$ROOT/tmux"
+  export TMUX_TMPDIR="$ROOT/tmux"
   assert_isolated
   # The hook scripts live under the bound root, so no hooks.json holds a host path.
   mkdir -p "$ROOT/kit"
@@ -832,11 +992,47 @@ main() {
 
 # assert_isolated: only a loopback interface exists and no host path is mapped.
 assert_isolated() {
+  if [[ "$PLATFORM" == Darwin ]]; then
+    # Each probe is compared with the unsandboxed control taken before the
+    # sandbox started, so a probe that fails everywhere proves nothing.
+    [[ "${CAPTURE_DNS_CONTROL:-}" == resolves && "${CAPTURE_LOOP_CONTROL:-}" == connects ]] ||
+      die "no unsandboxed control for the isolation probes"
+    if dscacheutil -q host -a name example.com 2>/dev/null | grep -q '^ip_address'; then
+      die "names resolve inside the sandbox"
+    fi
+    if nc -z -w 2 127.0.0.1 "${CAPTURE_LOOP_PORT:?}" >/dev/null 2>&1; then
+      die "a loopback connection works inside the sandbox"
+    fi
+    if nc -z -w 2 -U /var/run/mDNSResponder >/dev/null 2>&1; then
+      die "the resolver socket is reachable inside the sandbox"
+    fi
+    return 0
+  fi
   local links
   links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
   [[ "$links" == "lo " ]] || die "network namespace is not loopback-only: $links"
   [[ -n "${CAPTURE_HOST_ROOT:-}" && "$ROOT" == /run/capture-root ]] ||
     die "capture root is not bound inside the namespace"
+}
+
+# darwin_identity_values: the names and ids macOS exposes to the CLI, one per
+# line, read at run time so no value is written into the repository.
+darwin_identity_values() {
+  local ioreg_out name
+  ioreg_out="$(ioreg -rd1 -c IOPlatformExpertDevice)"
+  {
+    hostname -s
+    scutil --get ComputerName
+    scutil --get LocalHostName
+    /usr/bin/id -F
+    awk -F'"' '/IOPlatformSerialNumber|IOPlatformUUID/ { print $4 }' <<<"$ioreg_out"
+  } | awk 'length($0) >= 3' >"$ROOT/.identity.$$"
+  # The short host name, the two scutil names, the serial and the UUID must all
+  # be present, or the scan would silently skip them.
+  [[ "$(wc -l <"$ROOT/.identity.$$")" -ge 5 ]] || { rm -f "$ROOT/.identity.$$"; die "could not read the host identity values"; }
+  name="$(cat "$ROOT/.identity.$$")"
+  rm -f "$ROOT/.identity.$$"
+  printf '%s\n' "$name"
 }
 
 # scan_evidence <dir>: fails when a host-specific string appears in the staged
@@ -847,10 +1043,13 @@ scan_evidence() {
   local dir="$1" needle f squashed lower bad=0 part
   local needles=() derived=()
   local raw=("$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$CAPTURE_HOST_USER" \
-    "$CAPTURE_HOST_HOSTNAME" "$SCRIPT_DIR" "$REPO_DIR")
+    "$CAPTURE_HOST_HOSTNAME" "$SCRIPT_DIR" "$REPO_DIR" "${CAPTURE_HOST_ROOT#/private}")
   for needle in "${raw[@]}"; do
     [[ -n "$needle" ]] && needles+=("$needle")
   done
+  while IFS= read -r needle; do
+    [[ -n "$needle" ]] && needles+=("$needle")
+  done <<<"${CAPTURE_HOST_IDS:-}"
   # Path components that identify the host: those with a digit or underscore.
   for needle in "$CAPTURE_HOST_ROOT" "$CAPTURE_HOST_HOME" "$SCRIPT_DIR" "$REPO_DIR"; do
     for part in ${needle//\// }; do
@@ -888,10 +1087,10 @@ scan_evidence() {
 # Paths under compat/ each step owns; a successful step replaces them.
 step_owned() {
   case "$1" in
-    version) echo "install/installer.sha256 install/installer-output.txt install/layout.txt install/version.txt help sessions/default-home-tree.txt RELEASE" ;;
+    version) echo "install/installer.sha256 install/installer-output.txt install/layout.txt install/version.txt help sessions/default-home-tree.txt sessions/credential-backend-default-home.txt RELEASE" ;;
     login) echo "screens/login screens/api-key" ;;
     trust) echo "screens/trust" ;;
-    turn) echo "install/process.txt screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt" ;;
+    turn) echo "install/process.txt screens/idle screens/working screens/done osc7501/turn-answered.txt osc7501/turn-unanswered.txt osc7501/title-answered.txt osc7501/title-unanswered.txt osc7501/startup-queries.txt sessions/credential-backend-turn.txt" ;;
     update-notice) echo "screens/update-notice" ;;
     hooks) echo "hooks/project hooks/managed-env hooks/managed-nolist screens/clear" ;;
     sessions) echo "screens/fork screens/resume screens/seed hooks/fork-session hooks/resume-root hooks/resume-fork sessions/head-1.jsonl sessions/head-2.jsonl sessions/head-3.jsonl sessions/tree.txt sessions/seed.txt sessions/runtime-1.json sessions/runtime-2.json sessions/runtime-3.json" ;;

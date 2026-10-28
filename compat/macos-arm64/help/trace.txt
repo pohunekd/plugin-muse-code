@@ -1,0 +1,7 @@
+muse trace — inspect a recorded Muse Code trace
+
+Usage: muse trace inspect [OPTIONS]
+
+Run `muse trace inspect --help` for the full flag list (fixture, session-log,
+run-log, task-log, render-mode, format, and more).
+

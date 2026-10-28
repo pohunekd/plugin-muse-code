@@ -34,6 +34,7 @@ Handlers, reporters and parsers stay in the core repository
 | `compat/screens/<scenario>/<width>.txt` | Terminal screens at widths 20 to 200: trust, login, api-key, idle, working, done, approval, question, update-notice, clear, fork, resume, seed |
 | `compat/osc7501/` | OSC 7501 program-status records per scenario, terminal titles, the startup queries |
 | `compat/hooks/<scenario>/` | One JSON file per hook call: event, stdin payload, environment names, the `MUSE_*`/`TBH_*` values |
+| `compat/macos-arm64/` | The same layout for macOS arm64: install, help, the login, api-key, trust, idle, working, done and update-notice screens, OSC 7501 records and titles, the default-HOME tree and the credential backend the sessions report |
 | `compat/sessions/` | Session store tree and the first records of a session (strings over 80 characters become `<N chars>`; host fields such as pids and free disk space are dropped) |
 
 ## No credentials, no real model
@@ -52,7 +53,7 @@ The kit never logs in, never stores a credential and never calls a real model:
 
 ## Running the kit
 
-Needs bash 4+, tmux, curl, jq, sed, awk, sha256sum, git, ps, socat, ip, mount,
+Needs bash 4+, tmux, curl, jq, sed, awk, perl, sha256sum, git, ps, socat, ip, mount,
 hostname and util-linux `unshare` 2.38+ with unprivileged user, network, mount
 and UTS namespaces (`--map-root-user`, `--map-user`).
 
@@ -67,6 +68,10 @@ scripts/capture --root /path/to/scratch hooks stub      # single steps
 streams. Run it on a disposable host or VM; never point it at a real HOME.
 Paths below `--root` are replaced in the evidence by a placeholder of the same
 width, so the layout of narrow screens is preserved.
+
+On macOS the kit runs the screen and OSC steps (`install version login trust turn update-notice`; `hooks`, `sessions` and `stub` are refused) under a `sandbox-exec` profile, with bash 4+ and GNU sed, stat, find and date first on the PATH (for example from nix); `--out compat/macos-arm64` selects the evidence directory. The profile denies all socket traffic including loopback, allows unix sockets only below `--root` (tmux, at most 60 characters), denies the mach lookups that resolve names or hand a URL to the user's browser, and denies `/usr/bin/open` (the last two are not probed). The Keychain is not blocked: a lookup still answers inside the sandbox. The credential backend is forced to a file for every launcher; the sessions report it in `compat/macos-arm64/sessions/credential-backend-*.txt`, and the kit fails if a session reports another backend. Before the first step the kit takes controls outside the sandbox (a name resolves, a loopback connection works) and requires each probe to fail inside it. Its scan also looks for the host name, computer name, full name, serial number and hardware UUID, which it reads at run time.
+
+The profile does not confine the filesystem: the CLI can still read the real user's home and write below its `~/Library`, so a dedicated throwaway user or a VM would be stronger. The default-HOME tree on macOS lacks the `runtime/` and `session-server` entries of the Linux run.
 
 A new Muse release is captured by re-running the kit before the lock moves:
 `supported.below` stays at the next minor until the new captures pass.
@@ -158,11 +163,25 @@ unverified.
 | Launch (P1, `scripts/smoke`) | Through a pohunek build of core `680c35b86` in a loopback-only namespace: `--agent muse` launches `muse-bin-<release> --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, shows no trust dialog, reads `blocked` on the sign-in choice (never answered); with `--provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
 
+### macOS arm64
+
+Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox profile above; evidence in `compat/macos-arm64/`.
+
+| Area | Result |
+|---|---|
+| Release | Same release `1.4.14-R7309.1` and the same launcher (sha256 equal); the binary is a 423,687,488-byte Mach-O build |
+| OSC 7501 | Identical to Linux: probe `ESC ] 7501 ; ? ESC \` at startup, records only after it is answered, `app=muse`, states `idle`, `working`, `done`; terminal title is the directory name with a braille spinner while working |
+| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame has no SSH-projection notice |
+| Launcher notice | `Muse Code updated A -> B` as on Linux |
+| Credential backend | With `TBH_CREDENTIAL_BACKEND=file` the session record reports `credential_backend` `file` and `keychain_fallback_reason` `none`, in the default-HOME run and in the turn scenario |
+
+Not captured on macOS: hooks, session resume and fork, the stub screens (no `socat`), the pane process (`ps` is refused inside the sandbox), and the default Keychain backend (the file backend was forced). The default-HOME tree (`sessions/default-home-tree.txt`) is captured. The rest stays unverified there.
+
 ### Unverified
 
 - The first idle frame, the resume screens and the seed screen in a normal, non-namespaced run: unprivileged namespaces cannot map host root, so root-owned files appear owned by nobody and Muse prints the SSH-projection notice there. The footer itself is backed by `screens/done/<w>.txt` and `screens/working/<w>.txt` at every width.
-- macOS arm64 captures (the kit is Linux-only so far) and the Keychain versus
-  file credential behaviour.
+- On macOS: hooks, session resume and fork, the stub screens, and the Keychain
+  credential backend.
 - A real model turn, real approval variants beyond the single-stage shell
   command (`Always allow in this workspace`), `Notification` for approvals,
   `PostToolUseFailure`, compaction hooks, `StopFailure`, `Interrupt`.

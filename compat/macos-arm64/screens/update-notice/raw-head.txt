@@ -1,0 +1,6 @@
+Muse Code updated 1.4.0-R1 -> 1.4.14-R7309.1<CR>
+<ESC>]7501;?<ESC>\<ESC>]10;?<BEL><ESC>]11;?<BEL><ESC>]4;0;?<BEL><ESC>]4;1;?<BEL><ESC>]4;2;?<BEL><ESC>]4;3;?<BEL><ESC>]4;4;?<BEL><ESC>]4;5;?<BEL><ESC>]4;6;?<BEL><ESC>]4;7;?<BEL><ESC>]4;8;?<BEL><ESC>]4;9;?<BEL><ESC>]4;10;?<BEL><ESC>]4;11;?<BEL><ESC>]4;12;?<BEL><ESC>]4;13;?<BEL><ESC>]4;14;?<BEL><ESC>]4;15;?<BEL><ESC>[?2004h<ESC>[?1004h<ESC>[0 q<ESC>[?25l<ESC>[>3u<ESC>[?u<ESC>[c<ESC>[6n
+
+
+
+<ESC>[6;1H<ESC>[2K<ESC>7<ESC>[2;8r<ESC>[2;1H<ESC>M<ESC>M<ESC>M<ESC>[r<ESC>8<ESC>[2;1H<ESC>[38;5;242;49m  <ESC>[3;1H  <ESC>[1m<ESC>[38;5;252;49mMuse Code<ESC>[22m 

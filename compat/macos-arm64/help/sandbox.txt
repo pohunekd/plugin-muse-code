@@ -1,0 +1,2 @@
+usage: muse sandbox windows check
+       muse sandbox windows setup

@@ -1,0 +1,4 @@
+Usage: muse config validate --plane <defaults|policy> --file <path>
+       muse config status
+
+validate checks an enterprise plane document ({"schema_version":1,"settings":{...}} for defaults), not the user's flat settings.json; unknown top-level settings.json members are named at startup instead.

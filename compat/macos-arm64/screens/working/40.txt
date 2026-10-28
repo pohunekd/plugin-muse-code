@@ -1,0 +1,11 @@
+
+  Muse Code 1.4.14
+
+❯ hello there
+
+◈ Thinking (0s · esc to interrupt)
+
+── Voice input (⌥ + v to start) ────────
+❯
+────────────────────────────────────────
+  echo · /…/turn/ws · Auto-review
