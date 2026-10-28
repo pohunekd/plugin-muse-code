@@ -108,9 +108,10 @@ Limits:
 - No native session reference: resume and fork are off until a hook capture
   verifies them (P2). A Muse the user starts by hand reports through its
   process and screen only.
-- `Always allow in this workspace` and the other approval profile names
-  (`Ask me`, `Read-only`, `Unrestricted`) are in the rules from prior art and
-  are unverified.
+- `Always allow in this workspace` is in the approval rule from prior art and
+  is unverified. No rule names the approval profiles (`Ask me`, `Read-only`,
+  `Unrestricted`); only `Auto-review` appears in a capture, in a footer no rule
+  reads.
 
 ## Checks
 
