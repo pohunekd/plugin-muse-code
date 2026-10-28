@@ -1,0 +1,14 @@
+[package]
+name = "muse-plugin-kit"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Stand-in for the pohunek plugin kit: lints, builds and checks the Muse package against core."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+pohunek-daemon = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }
+pohunek-package = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }
+pohunek-protocol = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }

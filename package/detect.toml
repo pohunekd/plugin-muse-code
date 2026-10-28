@@ -1,0 +1,152 @@
+# Muse Code activity manifest.
+#
+# Screens and OSC records come from Muse Code 1.4.14 (compat/). Phrases that
+# no capture shows are marked `unverified`.
+
+# The launcher script `exec`s the static binary `muse-bin-<release>`, so the
+# running process is the binary. The kernel cuts `comm` to 15 bytes
+# (`muse-bin-1.4.14`), so a longer release id ends inside the name and the
+# pattern accepts any prefix of `muse-bin-<release>`. The command line is argv
+# joined with spaces, so each pattern names the program at its start.
+[process]
+comm = ['^muse(-bin(-[0-9][0-9A-Za-z.-]*)?)?$']
+cmdline = [
+  '^(\S*/)?muse($| )',
+  '^(\S*/)?bash (\S*/)?muse($| )',
+  '^(\S*/)?muse-bin-[0-9]+\.[0-9]+\.[0-9]+-R[0-9]+(\.[0-9]+)?($| )',
+]
+
+# Muse reports its root state as OSC 7501 records once the session worker
+# answers its `ESC ] 7501 ; ? ST` startup probe; it sends none before the
+# answer. A visible dialog still wins over the record. Background terminals
+# report as `id=` records, which are ignored.
+[program_status]
+app = "muse"
+answer_probe = true
+
+# While a turn runs the title leads with a braille spinner frame; idle it is
+# the plain workspace directory name, which carries no evidence.
+[[rules]]
+id = "osc_title_working"
+state = "working"
+priority = 1100
+region = "osc_title"
+regex = ['^[\x{2800}-\x{28FF}] ']
+
+# Status line of a running turn, `◇ Thinking (14s · esc to interrupt)`,
+# `◈ Calling tools (13s · ...)`, `◆ Double checking (17s · ...)`. The glyph
+# alternates between frames and the verb changes, so the line is matched by its
+# timer and hint. The composer stays on screen during a turn, so this must
+# outrank `idle_composer`, and a dialog (priority 980) outranks it. A finished
+# transcript line also starts with `◆`, but never carries the hint.
+[[rules]]
+id = "working_status_line"
+state = "working"
+priority = 960
+region = "whole_recent"
+line_regex = ['^\s*[\x{25C6}\x{25C7}\x{25C8}]\s+\S.*\([0-9]+[smh](?: [0-9]+[sm])?\s+\x{B7}\s+esc\s+to\s+interrupt\)']
+
+# The first frames of a turn show the bare status line, `◇ Thinking`, before
+# the timer appears, and a narrow terminal cuts the line before the hint
+# (`◈ Calling tools (13s`). `◇` and `◈` are spinner frames only: a finished
+# transcript line starts with `◆`.
+[[rules]]
+id = "working_status_frame"
+state = "working"
+priority = 960
+region = "whole_recent"
+line_regex = ['^\s*[\x{25C7}\x{25C8}]\s+\p{Lu}\p{L}*(?: \p{L}+)*(?: \(.*)?$']
+
+# Muse cuts a dialog line at the terminal width instead of wrapping it, so the
+# dialog rules below match prefixes of their phrases (`Trust and conti`).
+# First-run dialog: `1  Trust and continue` / `2  Quit`. A launch passes
+# `--trust-workspace`, so the dialog is a fallback; it draws no rule lines.
+[[rules]]
+id = "trust_dialog"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+regex = [
+  '(?i)do\s+you\s+trust\s+this\s+work',
+  '(?i)trust\s+and\s+con',
+]
+not = { line_regex = ['^\s*\x{276F}'] }
+
+# Sign-in choice (like the other first-run dialogs, only read while no
+# composer is drawn, so a transcript that quotes it stays unblocked): `Log in with browser` / `Set an API key`. Enter on the first
+# entry starts a device-code request at Meta.
+[[rules]]
+id = "login_choice"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+regex = [
+  '(?i)log\s+in\s+with\s+browser',
+  '(?i)set\s+an\s+api\s+key',
+]
+not = { line_regex = ['^\s*\x{276F}'] }
+
+[[rules]]
+id = "api_key_prompt"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+regex = [
+  '(?i)paste\s+your\s+model\s+api\s+key',
+  '(?i)enter\s+validate',
+]
+not = { line_regex = ['^\s*\x{276F}'] }
+
+# Approval stage: the heading is paired with a grant entry. `Allow this stage
+# once` is captured; `Always allow in this workspace` is unverified (prior art
+# only). The dialog replaces the composer between the two rule lines, below
+# the `Calling tools` status line, which the dialog outranks.
+[[rules]]
+id = "approval_stage"
+state = "blocked"
+priority = 980
+region = "prompt_box_body"
+visible_blocker = true
+regex = ['(?i)would\s+you\s+like\s+to\s+ru']
+all = [
+  { any = [
+    { regex = ['(?i)allow\s+this\s+stag'] },
+    { regex = ['(?i)always\s+allow\s+in\s+this\s+w'] },
+  ] },
+]
+
+# Question picker: its footer is `Enter to select · ↑/↓ to move · Tab for an
+# optional note · Esc to interrupt`. The picker sits above the composer, which
+# stays on screen.
+[[rules]]
+id = "question_picker"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+regex = [
+  '(?i)enter\s+to\s+select',
+  '(?i)tab\s+for\s+an\s+optional\s+note',
+]
+
+# The composer is the prompt box body between the two rule lines. `❯` is the
+# idle prompt; `⟩` is the cursor of dialogs and pickers, which do not match.
+[[rules]]
+id = "idle_composer"
+state = "idle"
+priority = 950
+region = "prompt_box_body"
+line_regex = ['^\s*\x{276F}']
+
+# The launcher prints `Muse Code updated <old> -> <new>` before it starts the
+# new binary; with `MUSE_NO_AUTO_UPDATE=1` it never appears. Any screen rule
+# of the TUI outranks it.
+[[rules]]
+id = "launcher_update_notice"
+state = "working"
+priority = 200
+region = "top_non_empty_lines(1)"
+regex = ['^Muse Code updated \S+ -> \S+']

@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# End-to-end check of the Muse Code package against a pohunek build: links
+# `package/` into an isolated daemon, launches the Muse release installed under
+# --muse-dir and asserts status, input, trust and update behaviour.
+#
+# The daemon, its workers and Muse run in a network namespace that has only a
+# loopback interface, with their own HOME and XDG roots below --root. No
+# credential, no login and no real model is involved: the working turn uses
+# Muse's own `--provider echo`, and the sign-in screen is only looked at, never
+# answered.
+#
+#   scripts/smoke --root DIR --core-bin DIR --muse-dir DIR
+#
+#   --root      scratch directory for the isolated HOME (created, reused only
+#               when it carries the marker this script writes)
+#   --core-bin  directory with the pohunek, pohunekd and pohunek-sessiond
+#               binaries of a core build that has the runtime features the
+#               package requires
+#   --muse-dir  directory of an installed Muse launcher (`muse`, `.muse-version`,
+#               `muse-bin-<release>`); it is copied, never run in place
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO="$(dirname "$SCRIPT_DIR")"
+
+# Seconds each wait loop polls before it fails, and the poll interval.
+WAIT_SECONDS=40
+POLL_SECONDS=0.5
+# Delay Muse's echo provider adds to a turn so `working` is observable.
+ECHO_DELAY_MS=4000
+PROMPT="smoke prompt"
+# Initial-input acknowledgement window, and the poll interval and attempts used
+# to catch the short `working` phase of a delayed echo turn.
+INPUT_ACK_MS=8000
+FAST_POLL_SECONDS=0.25
+WORKING_POLLS=$((WAIT_SECONDS * 4))
+# Bound on waiting for the daemon after teardown.
+REAP_SECONDS=10
+
+ROOT="" CORE_BIN="" MUSE_DIR=""
+DAEMON_PID=""
+NETNS=""
+
+log() { printf 'smoke: %s\n' "$*" >&2; }
+die() {
+  log "FAIL: $*"
+  exit 1
+}
+
+usage() {
+  sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d;s/^# \{0,1\}//' >&2
+  exit 2
+}
+
+while (($# > 0)); do
+  case "$1" in
+    --root) ROOT="${2:?}"; shift 2 ;;
+    --core-bin) CORE_BIN="${2:?}"; shift 2 ;;
+    --muse-dir) MUSE_DIR="${2:?}"; shift 2 ;;
+    -h | --help) usage ;;
+    *) usage ;;
+  esac
+done
+[[ -n "$ROOT" && -n "$CORE_BIN" && -n "$MUSE_DIR" ]] || usage
+
+for tool in unshare ip jq sha256sum cp git readlink sed; do
+  command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
+done
+unshare --help 2>&1 | grep -q -- '--map-user' || die "unshare lacks --map-user (util-linux 2.38 or later)"
+for bin in pohunek pohunekd pohunek-sessiond; do
+  [[ -x "$CORE_BIN/$bin" ]] || die "$CORE_BIN/$bin is not executable"
+done
+[[ -x "$MUSE_DIR/muse" && -f "$MUSE_DIR/.muse-version" ]] || die "$MUSE_DIR is not a Muse install"
+
+MARKER=".muse-plugin-smoke-root"
+mkdir -p "$ROOT"
+ROOT="$(cd "$ROOT" && pwd -P)"
+if [[ -n "$(ls -A "$ROOT")" && ! -e "$ROOT/$MARKER" ]]; then
+  die "$ROOT is not empty and was not created by this script"
+fi
+touch "$ROOT/$MARKER"
+# A socket path is bounded by sun_path; fail early with a clear message.
+((${#ROOT} <= 60)) || die "--root is too long for the daemon socket path (${#ROOT} > 60)"
+
+HOME_DIR="$ROOT/home"
+RT_DIR="$ROOT/rt"
+WS="$ROOT/ws"
+rm -rf "$HOME_DIR" "$RT_DIR" "$WS" "$ROOT/stage" "$ROOT/daemon.log"
+mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/pohunek/agents" "$HOME_DIR/.local/share" \
+  "$HOME_DIR/.local/state" "$WS" "$ROOT/stage"
+chmod 700 "$RT_DIR" 2>/dev/null || { mkdir -p "$RT_DIR" && chmod 700 "$RT_DIR"; }
+chmod 700 "$HOME_DIR/.config/pohunek" "$HOME_DIR/.config/pohunek/agents"
+
+# The release is copied once; its version file and launcher hash are compared
+# after the run.
+release="$(<"$MUSE_DIR/.muse-version")"
+[[ "$release" == "$(<"$REPO/compat/RELEASE")" ]] || die "$MUSE_DIR holds Muse $release, compat/RELEASE locks $(<"$REPO/compat/RELEASE")"
+for f in muse .muse-version .muse-release-info.json "muse-bin-$release"; do
+  [[ -e "$MUSE_DIR/$f" ]] || die "$MUSE_DIR/$f is missing"
+  cp --reflink=auto -a "$MUSE_DIR/$f" "$HOME_DIR/.local/bin/"
+done
+before_version="$(<"$HOME_DIR/.local/bin/.muse-version")"
+before_launcher="$(sha256sum "$HOME_DIR/.local/bin/muse" | cut -d' ' -f1)"
+install_listing() { find "$1" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' '; }
+before_files="$(install_listing "$HOME_DIR/.local/bin")"
+git -C "$WS" init -q .
+git -C "$WS" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m init
+
+# Every command runs with a cleared environment, so nothing of the caller's
+# POHUNEK_* or credential variables reaches the daemon or the CLI.
+isolated() {
+  env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" XDG_DATA_HOME="$HOME_DIR/.local/share" \
+    XDG_STATE_HOME="$HOME_DIR/.local/state" XDG_RUNTIME_DIR="$RT_DIR" \
+    PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 "$@"
+}
+pk() { isolated "$CORE_BIN/pohunek" "$@"; }
+
+teardown() {
+  local status=$?
+  if [[ -n "$NETNS" ]]; then
+    # Every process in the private namespace belongs to this run.
+    local pid
+    for pid in /proc/[0-9]*; do
+      pid="${pid#/proc/}"
+      [[ "$(readlink "/proc/$pid/ns/net" 2>/dev/null)" == "$NETNS" ]] || continue
+      kill "$pid" 2>/dev/null || true
+    done
+  fi
+  if [[ -n "$DAEMON_PID" ]]; then
+    # Without a verified namespace only the job this script started is signalled.
+    [[ -n "$NETNS" ]] || kill "$DAEMON_PID" 2>/dev/null || true
+    local i
+    for ((i = 0; i < REAP_SECONDS * 2; i++)); do
+      kill -0 "$DAEMON_PID" 2>/dev/null || break
+      sleep "$POLL_SECONDS"
+    done
+    kill -0 "$DAEMON_PID" 2>/dev/null && kill -9 "$DAEMON_PID" 2>/dev/null || true
+    wait "$DAEMON_PID" 2>/dev/null || true
+  fi
+  if ((status == 0)); then
+    log "PASS"
+  else
+    log "exit $status (daemon log: $ROOT/daemon.log)"
+  fi
+}
+trap teardown EXIT
+
+# --- daemon in a loopback-only namespace ---------------------------------
+uid="$(id -u)" gid="$(id -g)"
+# The inner script is single-quoted on purpose: it expands its own arguments.
+# shellcheck disable=SC2016
+unshare --user --map-root-user --net --mount bash -c '
+  ip link set lo up
+  exec unshare --user --map-user="$1" --map-group="$2" "${@:3}"
+' _ "$uid" "$gid" env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" \
+  XDG_DATA_HOME="$HOME_DIR/.local/share" XDG_STATE_HOME="$HOME_DIR/.local/state" \
+  XDG_RUNTIME_DIR="$RT_DIR" PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color \
+  LANG=C.UTF-8 "$CORE_BIN/pohunek" daemon start --dev-subprocess >"$ROOT/daemon.log" 2>&1 &
+DAEMON_PID=$!
+
+wait_for() { # <description> <command...>
+  local what="$1" i
+  shift
+  for ((i = 0; i < WAIT_SECONDS * 2; i++)); do
+    if "$@" >/dev/null 2>&1; then return 0; fi
+    sleep "$POLL_SECONDS"
+  done
+  die "timed out waiting for $what"
+}
+wait_for "the isolated daemon" pk health
+
+# The CLI must reach the daemon of this root, not another one.
+socket="$RT_DIR/pohunek/daemon.sock"
+[[ -S "$socket" ]] || die "no daemon socket at $socket"
+# `unshare` and `env` exec in place, so the background job is the daemon.
+daemon_netns="$(readlink "/proc/$DAEMON_PID/ns/net")"
+[[ -n "$daemon_netns" ]] || die "cannot find the daemon process"
+[[ "$daemon_netns" != "$(readlink /proc/self/ns/net)" ]] || die "the daemon shares the host network namespace"
+NETNS="$daemon_netns"
+log "daemon is up in $NETNS (host: $(readlink /proc/self/ns/net))"
+
+# --- package under a development id --------------------------------------
+cp "$REPO/package/runtime.toml" "$REPO/package/detect.toml" "$ROOT/stage/"
+sed -i 's/^id = "pohunek\.runtime\.muse"$/id = "dev.runtime.muse"/' "$ROOT/stage/runtime.toml"
+grep -q '^id = "dev.runtime.muse"$' "$ROOT/stage/runtime.toml" || die "could not stage the development id"
+pk plugin link "$ROOT/stage" --yes >/dev/null
+digest="$(pk plugin list --json | jq -r '.ok.packages[0].digest')"
+pk plugin enable dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
+pk plugin select dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
+pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
+
+# A profile replaces the descriptor's arguments, so it restates
+# --trust-workspace and adds the credential-free provider.
+cat >"$HOME_DIR/.config/pohunek/agents/muse-echo.toml" <<EOF
+base = "muse"
+package = "dev.runtime.muse"
+digest = "$digest"
+program = "muse"
+args = ["--trust-workspace", "--provider", "echo", "--echo-delay-ms", "$ECHO_DELAY_MS"]
+EOF
+chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-echo.toml"
+
+activity_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .activity // "none"'; }
+session_id() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .id'; }
+muse_pid_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .pid'; }
+want_activity() { [[ "$(activity_of "$1")" == "$2" ]]; }
+
+# --- 1. bare launch: no trust dialog, sign-in blocks, nothing is answered -
+pk session new --agent muse --cwd "$WS" --name bare --yes >/dev/null
+wait_for "the bare session to read blocked" want_activity bare blocked
+bare_screen="$(pk session screen "$(session_id bare)")"
+grep -qi 'Log in with browser' <<<"$bare_screen" || die "the bare session does not show the sign-in choice"
+grep -qi 'trust this workspace' <<<"$bare_screen" && die "the trust dialog appeared despite --trust-workspace"
+bare_pid="$(muse_pid_of bare)"
+args="$(tr '\0' ' ' <"/proc/$bare_pid/cmdline")"
+[[ "$args" == *"muse-bin-"*" --trust-workspace "* ]] || die "unexpected launch arguments: $args"
+tr '\0' '\n' <"/proc/$bare_pid/environ" | grep -qx 'MUSE_NO_AUTO_UPDATE=1' || die "MUSE_NO_AUTO_UPDATE=1 is not in the launch environment"
+[[ "$(readlink "/proc/$bare_pid/ns/net")" == "$NETNS" ]] || die "Muse is not in the loopback-only namespace"
+log "bare launch: blocked on the sign-in choice, trust dialog skipped, update flag set"
+pk session stop "$(session_id bare)" >/dev/null
+
+# --- 2. echo turn: composer ready, input accepted, working then idle ------
+pk session new --agent muse-echo --cwd "$WS" --name echo --input "$PROMPT" \
+  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/echo-new.json"
+[[ "$(jq -r '.ok.prompt_delivered' "$ROOT/echo-new.json")" == "true" ]] || die "the initial input did not start a turn"
+echo_id="$(jq -r '.ok.id' "$ROOT/echo-new.json")"
+reply_seen() { pk session screen "$echo_id" | grep -q "echo: $PROMPT"; }
+wait_for "the echo reply on screen" reply_seen
+wait_for "the echo session to read idle" want_activity echo idle
+log "echo turn: input reached the composer, reply rendered, activity idle"
+
+# A second turn proves the composer reads input after the first turn and that
+# working is observed while the delayed echo runs.
+pk session input "$echo_id" "second turn" >/dev/null
+seen_working=""
+for ((i = 0; i < WORKING_POLLS; i++)); do
+  case "$(activity_of echo)" in
+    working) seen_working=1; break ;;
+  esac
+  sleep "$FAST_POLL_SECONDS"
+done
+[[ -n "$seen_working" ]] || die "the second turn never read working"
+second_seen() { pk session screen "$echo_id" | grep -q 'echo: second turn'; }
+wait_for "the second reply on screen" second_seen
+wait_for "the echo session to read idle again" want_activity echo idle
+log "second turn: working observed, idle again"
+
+# --- 3. the launcher never reached the update path ------------------------
+bin="$HOME_DIR/.local/bin"
+[[ ! -e "$bin/.muse-update-checked-at" ]] || die "the launcher recorded an update check"
+[[ "$(<"$bin/.muse-version")" == "$before_version" ]] || die "the active release changed"
+[[ "$(sha256sum "$bin/muse" | cut -d' ' -f1)" == "$before_launcher" ]] || die "the launcher script changed"
+[[ "$(install_listing "$bin")" == "$before_files" ]] || die "files appeared in the install directory"
+log "update: no check recorded, release $before_version unchanged"
+
+pk session stop "$echo_id" >/dev/null

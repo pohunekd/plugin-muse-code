@@ -9,9 +9,11 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release**: no descriptor yet, evidence only; fixtures are unverified until the release in `compat/RELEASE` is the release you run |
+| Status | **pre-release (P1)**: launch and program status only; no hooks, no resume, no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `680c35b86` (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
+It needs a core with the runtime features `version-probe-revision-v1` and
+`launch-env-v1` (core 0.38 or a build of `main` that has them).
 Handlers, reporters and parsers stay in the core repository
 [`zajca/pohunek`](https://github.com/zajca/pohunek); the plan is the epic
 `zajca/pohunek#1644` and the issues P0-P5 of this repository.
@@ -20,6 +22,9 @@ Handlers, reporters and parsers stay in the core repository
 
 | Path | Content |
 |---|---|
+| `package/runtime.toml`, `package/detect.toml` | The runtime package: descriptor and detection manifest, exactly what the archive holds |
+| `kit/` | Stand-in for the plugin kit: a test crate that builds the package twice, installs it through core's definition path, reads the version banner and the process forms, and runs the detection manifest on every file of `compat/screens` and on the titles of `compat/osc7501` |
+| `scripts/smoke` | End-to-end check against a pohunek build and an installed Muse: isolated daemon in a loopback-only namespace, launch, input, status, update |
 | `scripts/capture` | Capture kit (bash, no third-party code): installs Muse into a throwaway HOME, drives it in a terminal and records what it shows |
 | `scripts/hook-log` | Hook command that logs the stdin payload and the environment names of a hook call |
 | `scripts/model-stub` | Loopback model endpoint (bash + jq) for approval and question screens without a model |
@@ -66,6 +71,59 @@ width, so the layout of narrow screens is preserved.
 A new Muse release is captured by re-running the kit before the lock moves:
 `supported.below` stays at the next minor until the new captures pass.
 
+## Install and use
+
+The plugin is not in the plugin index yet. Install it from a checkout:
+
+```bash
+cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
+pohunek plugin install ./muse.tar.zst --sha256 sha256:<digest> --yes
+pohunek plugin enable pohunek.runtime.muse
+pohunek plugin select pohunek.runtime.muse
+pohunek session new --agent muse
+```
+
+or, for development, `pohunek plugin link package --yes` followed by `enable` and
+`select`. Muse itself is installed by its own installer
+(`curl -fsSL https://dev.meta.ai/install.sh | sh`) and must be on the daemon's
+`PATH`; sign in once (`muse`), or set an API key, before a session can do
+work.
+
+What the package does:
+
+- Launches `muse --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1`. A trusted
+  workspace loads project hooks and rules, and project hooks run outside
+  Muse's sandbox (owner decision Q5, 2026-10-26: always trust).
+- Accepts the release range `[1.4.14, 1.5.0)`, read from
+  `Muse Code <release> (<release>-R<n>.<m>)`; the leading release is compared.
+- Reports `idle`, `working` and `blocked` from the screen (composer, status
+  line, trust, sign-in, API-key, approval and question dialogs), from the
+  terminal title, and from OSC 7501 records (`app=muse`, the probe is answered).
+- Types the first prompt once the composer is drawn (`ready = "screen_idle"`); the prompt is not an argument, so a prompt such as `logout` never selects a subcommand.
+
+Limits:
+
+- A host profile's `args` replace the descriptor's, so a profile over `muse`
+  restates `--trust-workspace`.
+- No native session reference: resume and fork are off until a hook capture
+  verifies them (P2). A Muse the user starts by hand reports through its
+  process and screen only.
+- `Always allow in this workspace` and the other approval profile names
+  (`Ask me`, `Read-only`, `Unrestricted`) are in the rules from prior art and
+  are unverified.
+
+## Checks
+
+```bash
+(cd kit && cargo test --locked)          # descriptor, version, process, screens, titles
+scripts/smoke --root /path/to/scratch \
+  --core-bin /path/to/core/target/debug --muse-dir /path/to/muse/install   # the release in `compat/RELEASE`
+```
+
+`kit/` pins the core revision it is proven against (`kit/Cargo.toml`) and the
+Rust toolchain of that revision (`kit/rust-toolchain.toml`). Move both together
+with a new core release, after the nightly core has passed the same tests.
+
 ## Verified behaviour
 
 Every row comes from a capture of the release in `compat/RELEASE` on Linux
@@ -95,6 +153,9 @@ unverified.
 | Resume and fork | `muse resume <id>` works for a root session and for a fork; `/fork` prints the fork id and `muse resume <id>`; `/clear` starts a new session and prints the old id |
 | Prompt seed | `muse "<prompt>"` submits the prompt as the first turn |
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
+| Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working |
+| Launch (P1, `scripts/smoke`) | Through a pohunek build of core `680c35b86` in a loopback-only namespace: `--agent muse` launches `muse-bin-<release> --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, shows no trust dialog, reads `blocked` on the sign-in choice (never answered); with `--provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
+| Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
 
 ### Unverified
 
@@ -112,7 +173,9 @@ unverified.
   `settings.json`.
 - The terminal-side update banner driven by the release manifest (`urgency`,
   `notification_text`); the launcher's own update notice is captured.
-- That `MUSE_NO_AUTO_UPDATE=1` leaves the network untouched.
+- That `MUSE_NO_AUTO_UPDATE=1` leaves the network untouched for the binary itself (the launcher part is read from its source and observed; the namespace has no route, so an attempt would fail silently).
+- The update-notice rule `launcher_update_notice` (the launcher line only; no TUI screen with a notice was captured).
+- Any macOS behaviour of the package (P4).
 
 Prior art cited by the plan (agent-deck, par-term, Zentty, Paradev, t3code,
 openclaw) was not re-verified here.

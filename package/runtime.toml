@@ -1,0 +1,51 @@
+# Runtime descriptor of the Muse Code package.
+#
+# Verified against Muse Code 1.4.14 (compat/RELEASE). The supported release
+# range below is `[min, below)`: `below` stays at the next minor until the
+# captures of a newer release pass.
+
+schema = 1
+id = "pohunek.runtime.muse"
+version = "0.1.0"
+runtime_api = 1
+requires = ["version-probe-revision-v1", "launch-env-v1"]
+
+[runtime]
+id = "muse"
+name = "Muse Code"
+program = "muse"
+# The workspace is always trusted, so the trust dialog does not hold a launch.
+# A trusted workspace loads project hooks and rules, and project hooks run
+# outside Muse's sandbox.
+args = ["--trust-workspace"]
+detect_manifest = "detect.toml"
+# Typed into the composer once it is drawn: a positional argument would let a
+# prompt such as `logout` select a subcommand.
+prompt_arg = false
+# `muse --version` prints `Muse Code <release> (<release>-R<n>.<m>)` on stdout;
+# the leading release is the one compared, the parenthesised id is the
+# annotation.
+version_probe = { parser = "semver-revision-line-v1", args = ["--version"], min = "1.4.14", below = "1.5.0", line = "Muse Code {version} {annotation}" }
+
+# The launcher replaces its binary in the background on every start unless
+# told not to; a pinned release must not change under a running host.
+[launch_env]
+MUSE_NO_AUTO_UPDATE = "1"
+
+# Muse enables bracketed paste and the kitty keyboard protocol in its startup
+# burst, before it draws a screen, so the enable signal is not readiness: only
+# the rendered composer (detect rule `idle_composer`) shows that it reads input.
+[input]
+bracketed_paste = true
+submit_delay_ms = 150
+text_policy = "unrestricted"
+ready = "screen_idle"
+
+[resume]
+supported = false
+
+[fork]
+supported = false
+
+[native_reference]
+strategy = "none"

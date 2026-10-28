@@ -30,8 +30,8 @@ under epic `zajca/pohunek#1644`; this repository's issues are P0-P5.
   (or `prior art only`) in README and in the issue comment that records it.
 - **Docs in the same PR** as the behaviour they describe.
 - **Testing policy.** Minimal tests: only for non-trivial logic and regressions
-  in it. CI runs shellcheck and the capture dry run; the CLI itself is not run in
-  CI. No coverage targets.
+  in it. CI runs shellcheck, the capture dry run and the `kit` tests; the CLI itself
+  is not run in CI. No coverage targets.
 - **PR bodies** use `Refs #N` only, never a closing keyword. No `Co-Authored-By`
   trailer, no generated-by footer.
 - **Comments** state what the code does or why, never the change history.
@@ -43,4 +43,10 @@ under epic `zajca/pohunek#1644`; this repository's issues are P0-P5.
 ```bash
 scripts/capture --root <dir> --dry-run all   # plan and tool check, no network
 scripts/capture --root <dir> all             # install the CLI and capture everything
+(cd kit && cargo test --locked)              # package checks against core (kit stand-in)
+scripts/smoke --root <dir> --core-bin <dir> --muse-dir <dir>   # end-to-end, isolated
 ```
+
+`package/` holds exactly the two files of the archive. `kit/` stands in for the
+plugin kit until it exists: it pins a core revision, so move the pin only
+together with the toolchain file and after the tests pass on the new revision.
