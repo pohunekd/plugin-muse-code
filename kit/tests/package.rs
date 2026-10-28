@@ -269,7 +269,7 @@ fn case_table() -> BTreeMap<&'static str, Case> {
         ("fork", all(Idle)),
         ("seed", all(Idle)),
         ("resume", all(Idle)),
-        ("update-notice", all(Working)),
+        ("update-notice", all(Idle)),
     ])
 }
 
