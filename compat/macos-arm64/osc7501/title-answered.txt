@@ -44,4 +44,5 @@
 <ESC>]0;⠹ ws
 <ESC>]0;⠸ ws
 <ESC>]0;⠼ ws
+<ESC>]0;⠴ ws
 <ESC>]0;ws

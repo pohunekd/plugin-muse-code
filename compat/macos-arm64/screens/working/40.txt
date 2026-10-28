@@ -3,7 +3,7 @@
 
 ❯ hello there
 
-◆ Thinking (0s · esc to interrupt)
+◈ Thinking (0s · esc to interrupt)
 
 ── Voice input (⌥ + v to start) ────────
 ❯

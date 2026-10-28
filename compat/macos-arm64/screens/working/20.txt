@@ -3,7 +3,7 @@
 
 ❯ hello there
 
-◆ Thinking (0s · esc
+◇ Working (0s · esc
 
 ── Voice input (⌥ …
 ❯
