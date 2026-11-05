@@ -9,6 +9,6 @@ description = "Stand-in for the pohunek plugin kit: lints, builds and checks the
 path = "src/lib.rs"
 
 [dependencies]
-pohunek-daemon = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }
-pohunek-package = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }
-pohunek-protocol = { git = "https://github.com/zajca/pohunek", rev = "680c35b86acfb540ce31a83b15f548eb4dd98fcd" }
+pohunek-daemon = { git = "https://github.com/zajca/pohunek", rev = "368a2d32cbc429eb5789bc73b9e53b562ac020e7" }
+pohunek-package = { git = "https://github.com/zajca/pohunek", rev = "368a2d32cbc429eb5789bc73b9e53b562ac020e7" }
+pohunek-protocol = { git = "https://github.com/zajca/pohunek", rev = "368a2d32cbc429eb5789bc73b9e53b562ac020e7" }
