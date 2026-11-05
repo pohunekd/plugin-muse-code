@@ -14,12 +14,12 @@ requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-bl
 id = "muse"
 name = "Muse Code"
 program = "muse"
-# Muse asks "Do you trust this workspace?" before it loads project hooks,
-# rules and skills, and project hooks run outside its sandbox. The descriptor
-# never trusts a checkout: the dialog reads blocked until the operator answers
-# it. A host profile for checkouts the operator owns may add
-# `--trust-workspace`.
-args = []
+# A Pohunek project is registered on purpose, so every launch trusts its
+# workspace and the trust dialog never holds it. Trust loads the checkout's
+# project hooks, rules and skills, and project hooks run outside Muse's
+# sandbox, so a checkout of a foreign PR or fork head runs that head's hooks
+# (#18). Resume reuses these arguments; fork is unsupported.
+args = ["--trust-workspace"]
 detect_manifest = "detect.toml"
 # Typed into the composer once it is drawn: a positional argument would let a
 # prompt such as `logout` select a subcommand.
@@ -44,7 +44,7 @@ text_policy = "unrestricted"
 ready = "screen_idle"
 # Every Muse dialog (trust, sign-in, approval, question) takes Enter as the
 # choice of its preselected entry, so text sent while one shows would answer
-# it unseen (measured on the trust dialog; unverified on approval and
+# it unseen (measured on the trust dialog; unverified on sign-in, approval and
 # question); the operator answers through `pohunek attach`.
 refuse_while_blocked = true
 

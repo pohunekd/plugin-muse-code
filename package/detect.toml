@@ -59,9 +59,9 @@ line_regex = ['^\s*[\x{25C7}\x{25C8}]\s+\p{Lu}\p{L}*(?: \p{L}+)*(?: \(.*)?$']
 
 # Muse cuts a dialog line at the terminal width instead of wrapping it, so the
 # dialog rules below match prefixes of their phrases (`Trust and conti`).
-# First-run dialog: `1  Trust and continue` / `2  Quit`. The descriptor never
-# passes `--trust-workspace`, so the dialog shows in every root Muse does not
-# trust yet; it draws no rule lines.
+# First-run dialog: `1  Trust and continue` / `2  Quit`. The descriptor passes
+# `--trust-workspace`, so the dialog shows only under a host profile whose
+# arguments leave the flag out; it draws no rule lines.
 [[rules]]
 id = "trust_dialog"
 state = "blocked"

@@ -7,7 +7,7 @@
 # loopback interface, with their own HOME and XDG roots below --root. No
 # credential, no login and no real model is involved: the turns use Muse's own
 # `--provider echo` or `scripts/model-stub` on the loopback with a placeholder
-# key, and the trust dialog is only looked at, never answered.
+# key, and the approval dialog is only looked at, never answered.
 #
 #   scripts/smoke --root DIR --core-bin DIR --muse-dir DIR
 #
@@ -40,8 +40,11 @@ FAST_POLL_SECONDS=0.25
 WORKING_POLLS=$((WAIT_SECONDS * 4))
 # Bound on waiting for the daemon after teardown.
 REAP_SECONDS=10
-# Time a refused input gets to reach Muse before the trust list is checked.
+# Time a refused input gets to reach Muse before its effect is checked.
 REFUSAL_SETTLE_SECONDS=2
+# File the stub's scripted bash call writes in the workspace once approved;
+# the redirect makes Muse ask for approval (a plain `touch` runs without it).
+APPROVAL_MARKER="smoke-approved"
 # Characters a path may hold where it becomes program text of the inner
 # `bash -c` and part of a socat address (`:` and `,` separate socat options).
 SAFE_PATH_RE='^[A-Za-z0-9._/+-]+$'
@@ -169,10 +172,10 @@ uid="$(id -u)" gid="$(id -g)"
 unshare --user --map-root-user --net --mount bash -c '
   ip link set lo up
   exec unshare --user --map-user="$1" --map-group="$2" bash -c "
-    STUB_STATE=$3 STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK STUB_TOOL_COMMAND=true \
+    STUB_STATE=$3 STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK STUB_TOOL_COMMAND=\"echo capture > $6\" \
       socat TCP-LISTEN:$5,bind=127.0.0.1,reuseaddr,fork EXEC:$4 &
-    exec \"\$@\"" _ "${@:6}"
-' _ "$uid" "$gid" "$ROOT/stub-state" "$REPO/scripts/model-stub" "$STUB_PORT" env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" \
+    exec \"\$@\"" _ "${@:7}"
+' _ "$uid" "$gid" "$ROOT/stub-state" "$REPO/scripts/model-stub" "$STUB_PORT" "$APPROVAL_MARKER" env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" \
   XDG_DATA_HOME="$HOME_DIR/.local/share" XDG_STATE_HOME="$HOME_DIR/.local/state" \
   XDG_RUNTIME_DIR="$RT_DIR" PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color \
   LANG=C.UTF-8 "$CORE_BIN/pohunek" daemon start --dev-subprocess >"$ROOT/daemon.log" 2>&1 &
@@ -209,8 +212,8 @@ pk plugin enable dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
 pk plugin select dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
 pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
 
-# A profile replaces the descriptor's arguments; this synthetic workspace is the
-# operator's own, so the profile trusts it and adds the credential-free provider.
+# A profile replaces the descriptor's arguments, so it restates
+# --trust-workspace and adds the credential-free provider.
 cat >"$HOME_DIR/.config/pohunek/agents/muse-echo.toml" <<EOF
 base = "muse"
 package = "dev.runtime.muse"
@@ -224,22 +227,41 @@ activity_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.nam
 session_id() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .id'; }
 muse_pid_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .pid'; }
 want_activity() { [[ "$(activity_of "$1")" == "$2" ]]; }
+settled() { case "$(activity_of "$1")" in idle | blocked) return 0 ;; esac; return 1; }
+native_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .native_session_id // empty'; }
 
-# --- 1. bare launch: the trust dialog blocks and refuses input ------------
+# --- 1. bare launch: trusted, composer drawn, resume keeps the flag -------
+# Muse also reads its provider from `settings.json`, so the bare session runs
+# the descriptor's own arguments with the credential-free provider.
+muse_settings="$HOME_DIR/.config/muse/settings.json"
+mkdir -p "$(dirname "$muse_settings")"
+printf '%s\n' '{"schema_version":1,"provider":"echo"}' >"$muse_settings"
 pk session new --agent muse --cwd "$WS" --name bare --yes >/dev/null
-wait_for "the bare session to read blocked" want_activity bare blocked
-bare_screen="$(pk session screen "$(session_id bare)")"
-grep -q 'Do you trust this workspace?' <<<"$bare_screen" || die "the bare session does not show the trust dialog"
+wait_for "the bare session to settle" settled bare
+bare_id="$(session_id bare)"
+pk session screen "$bare_id" | grep -q 'Do you trust this workspace?' && die "the bare session shows the trust dialog"
+wait_for "the bare session to read idle" want_activity bare idle
 bare_pid="$(muse_pid_of bare)"
 args="$(tr '\0' ' ' <"/proc/$bare_pid/cmdline")"
-[[ "$args" == *"muse-bin-"* && "$args" != *"--trust-workspace"* ]] || die "unexpected launch arguments: $args"
+[[ "$args" == *"muse-bin-"*" --trust-workspace "* ]] || die "unexpected launch arguments: $args"
 tr '\0' '\n' <"/proc/$bare_pid/environ" | grep -qx 'MUSE_NO_AUTO_UPDATE=1' || die "MUSE_NO_AUTO_UPDATE=1 is not in the launch environment"
 [[ "$(readlink "/proc/$bare_pid/ns/net")" == "$NETNS" ]] || die "Muse is not in the loopback-only namespace"
-refusal="$(pk session input "$(session_id bare)" "hello" --json || true)"
-[[ "$(jq -r '.err.code' <<<"$refusal")" == session_input_blocked ]] || die "input reached the trust dialog: $refusal"
-sleep "$REFUSAL_SETTLE_SECONDS"
-[[ ! -e "$HOME_DIR/.config/muse/trust.json" ]] || die "the workspace was trusted without the operator"
-log "bare launch: trust dialog blocks, input refused, nothing trusted, update flag set"
+pk session input "$bare_id" "bare turn" >/dev/null
+bare_reply() { pk session screen "$bare_id" | grep -q 'echo: bare turn'; }
+wait_for "the bare reply on screen" bare_reply
+bare_bound() { [[ -n "$(native_of bare)" ]]; }
+wait_for "the SessionStart report to bind the bare session" bare_bound
+pk session stop "$bare_id" >/dev/null
+pk session resume "$bare_id" >/dev/null
+wait_for "the resumed bare session to read idle" want_activity bare idle
+bare_resumed="$(tr '\0' ' ' <"/proc/$(muse_pid_of bare)/cmdline")"
+[[ "$bare_resumed" == *"muse-bin-"*" --trust-workspace -c managed_hooks_env_vars="*" resume $(native_of bare) " ]] ||
+  die "unexpected bare resume arguments: $bare_resumed"
+pk session stop "$bare_id" >/dev/null
+rm "$muse_settings"
+# `--trust-workspace` trusts the run only; Muse keeps no trust list for it.
+[[ ! -e "$HOME_DIR/.config/muse/trust.json" ]] || die "the launch saved a trust decision"
+log "bare launch: --trust-workspace on create and resume, no trust dialog, composer drawn, update flag set"
 pk session stop "$(session_id bare)" >/dev/null
 
 # --- 2. echo turn: composer ready, input accepted, working then idle ------
@@ -271,7 +293,6 @@ log "second turn: working observed, idle again"
 # --- 2b. identity, reminder threads, resume -------------------------------
 sessions_root="$HOME_DIR/.local/share/muse/sessions"
 hook_trace="$HOME_DIR/.local/state/pohunek/logs/pohunek-hooks.jsonl"
-native_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .native_session_id // empty'; }
 bound() { [[ -n "$(native_of echo)" ]]; }
 wait_for "the SessionStart report to bind the echo session" bound
 echo_native="$(native_of echo)"
@@ -287,7 +308,7 @@ pk session resume "$echo_id" >/dev/null
 wait_for "the resumed session to read idle" want_activity echo idle
 resumed_pid="$(muse_pid_of echo)"
 resumed_args="$(tr '\0' ' ' <"/proc/$resumed_pid/cmdline")"
-[[ "$resumed_args" == *' -c managed_hooks_env_vars=["POHUNEK_ENV",'*'] resume '"$echo_native"' ' ]] ||
+[[ "$resumed_args" == *"muse-bin-"*" --trust-workspace "*' -c managed_hooks_env_vars=["POHUNEK_ENV",'*'] resume '"$echo_native"' ' ]] ||
   die "unexpected resume arguments: $resumed_args"
 [[ "$(readlink "/proc/$resumed_pid/cwd")" == "$WS" ]] || die "the resumed Muse runs outside the workspace"
 # Names only: the values are the session's own and are never printed.
@@ -333,9 +354,26 @@ chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-stub.toml"
 pk session new --agent muse-stub --cwd "$WS" --name stub --input "stub hello" \
   --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/stub-new.json"
 [[ "$(jq -r '.ok.prompt_delivered' "$ROOT/stub-new.json")" == "true" ]] || die "the stub turn did not start"
-stub_reply() { pk session screen "$(session_id stub)" | grep -q 'stub reply'; }
+stub_id="$(session_id stub)"
+stub_reply() { pk session screen "$stub_id" | grep -q 'stub reply'; }
 wait_for "the stub reply" stub_reply
-pk session stop "$(session_id stub)" >/dev/null
+wait_for "the stub session to read idle" want_activity stub idle
+log "profile key: the stub turn ran"
+
+# --- 6. input is refused while the approval dialog shows -----------------------
+# Enter on the dialog picks `Allow this stage once`, so input that reached it
+# would run the stub's command unseen.
+pk session input "$stub_id" "please STUB_TOOL" >/dev/null
+approval_seen() { pk session screen "$stub_id" | grep -q 'Would you like to run the following command?'; }
+wait_for "the approval dialog" approval_seen
+wait_for "the stub session to read blocked" want_activity stub blocked
+refusal="$(pk session input "$stub_id" "hello" --json || true)"
+[[ "$(jq -r '.err.code' <<<"$refusal")" == session_input_blocked ]] || die "input reached the approval dialog: $refusal"
+sleep "$REFUSAL_SETTLE_SECONDS"
+[[ ! -e "$WS/$APPROVAL_MARKER" ]] || die "the command ran without the operator"
+approval_seen || die "the approval dialog was answered without the operator"
+log "approval: input refused, the command did not run, the dialog still shows"
+pk session stop "$stub_id" >/dev/null
 leaks="$(grep -rlF -- "$PLACEHOLDER_KEY" "$ROOT" | grep -vxF "$HOME_DIR/.config/pohunek/agents/muse-stub.toml" || true)"
 [[ -z "$leaks" ]] || die "the profile key appears in: $leaks"
-log "profile key: the stub turn ran, the key is in no file but the profile"
+log "profile key: the key is in no file but the profile"
