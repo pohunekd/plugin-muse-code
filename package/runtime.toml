@@ -8,7 +8,7 @@ schema = 1
 id = "pohunek.runtime.muse"
 version = "0.1.0"
 runtime_api = 1
-requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1", "config-home-subdir-v1", "integration-muse-hook-v1"]
+requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1", "config-home-subdir-v1", "integration-muse-hook-v1", "transcripts-data-root-v1"]
 
 [runtime]
 id = "muse"
@@ -64,6 +64,17 @@ supported = false
 [native_reference]
 strategy = "hook"
 
+# Recovery needs the session's own log: `<uuid>/session.jsonl` three dated
+# levels (`YYYY/MM/DD`) below the data root's `muse/sessions`.
+[native_reference.existence]
+check = "file"
+root_env = "XDG_DATA_HOME"
+root_home = ".local/share"
+dir = "muse/sessions"
+dir_name = "{reference}"
+file_name = "session.jsonl"
+max_depth = 3
+
 [integration]
 handler = "muse-hook-v1"
 hook_schema = "identity-subagent-v1"
@@ -74,3 +85,13 @@ hook_schema = "identity-subagent-v1"
 env = "XDG_CONFIG_HOME"
 subdir = "muse"
 default = ".config/muse"
+
+# Session logs live in the data root, not the config home; the observer reads
+# the first `runtime.session.metadata` record of each
+# `YYYY/MM/DD/<uuid>/session.jsonl`.
+[transcripts]
+parser = "muse-session-v1"
+root_env = "XDG_DATA_HOME"
+root_home = ".local/share"
+dir = "muse/sessions"
+max_depth = 4
