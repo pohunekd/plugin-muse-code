@@ -13,6 +13,7 @@
 #   scripts/real-run setup --root DIR --core-bin DIR --muse-dir DIR --repo DIR
 #                          (--real | --stub-port PORT)
 #   scripts/real-run daemon --root DIR start|stop
+#   scripts/real-run profile --root DIR
 #   scripts/real-run stub --root DIR start|stop [--tool-marker M]
 #                         [--tool-command C] [--ask-marker A] [--hold S]
 #   scripts/real-run scenario --root DIR --agent NAME N
@@ -29,10 +30,13 @@
 #                 writes the agent profile without a key: `muse_spark13.med`
 #                 for --real, `muse_stub` (placeholder key, loopback stub) for
 #                 --stub-port. It never touches an existing profile.
+#   profile       writes the root's profile again, without a key, after it was
+#                 removed (a scenario rerun); it never replaces a profile
 #   scenario      runs scenario N (1-7) of the design; exit 0 pass, 1 fail,
 #                 3 aborted, 4 recorded as evidence only (scenario 7)
 #   spend         prints the estimated spend of the run from PostLLMCall usage
-#   collect       writes the redacted evidence of every scenario run
+#   collect       writes the redacted evidence of the latest run of each
+#                 scenario; an earlier run of a scenario is left out
 #   scan          fails when evidence holds the value of $NAME, a home path,
 #                 a host value or an unredacted id; prints file names only.
 #                 --secret-only searches the value alone (a whole run root)
@@ -231,9 +235,20 @@ cmd_setup() {
   pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
   printf '%s\n' "$digest" >"$ROOT/package.digest"
 
-  local profile
+  write_profile "$digest" "$stub_port"
+}
+
+# write_profile <digest> <stub-port>: the agent profile of this root, without
+# a real key. It never replaces a profile: one may already hold the key.
+write_profile() {
+  local digest="$1" stub_port="$2" profile
   if [[ "$MODE" == real ]]; then
     profile="$HOME_DIR/.config/pohunek/agents/$REAL_PROFILE.toml"
+  else
+    profile="$HOME_DIR/.config/pohunek/agents/$STUB_PROFILE.toml"
+  fi
+  [[ ! -e "$profile" ]] || die "$profile exists; a profile is never replaced"
+  if [[ "$MODE" == real ]]; then
     # The key is added by the operator; `[env]` already exists for it.
     (umask 077 && cat >"$profile" <<EOF
 base = "muse"
@@ -246,7 +261,6 @@ TBH_MANAGED_HOOKS_PATH = "$ROOT/count-hooks.json"
 EOF
     )
   else
-    profile="$HOME_DIR/.config/pohunek/agents/$STUB_PROFILE.toml"
     (umask 077 && cat >"$profile" <<EOF
 base = "muse"
 package = "dev.runtime.muse"
@@ -260,8 +274,13 @@ EOF
     )
   fi
   chmod 600 "$profile"
-  run_note "setup: $MODE root ready, profile $profile"
+  run_note "profile: $profile written without a real key"
   printf '%s\n' "$profile"
+}
+
+cmd_profile() {
+  load_state
+  write_profile "$(<"$ROOT/package.digest")" "$(sed -n 's/^stub_port=//p' "$ROOT/run.state")"
 }
 
 # --- daemon --------------------------------------------------------------------------
@@ -938,6 +957,11 @@ redact_tree() {
     }' "$REPO" "$ROOT" "$HOME_DIR" "$REPO_DIR" "$HOME"
 }
 
+# latest_run_of <scenario>: the directory name of its highest run.
+latest_run_of() {
+  find "$ROOT/scenarios" -mindepth 1 -maxdepth 1 -name "$1-*" -printf '%f\n' | sort -t- -k2,2n | tail -n 1
+}
+
 cmd_collect() {
   load_state
   local out="" d n f event s stage
@@ -967,6 +991,9 @@ cmd_collect() {
   for ((i = 0; i < ${#dirs[@]}; i++)); do
     d="${dirs[i]}"
     name="${d##*/}"
+    # A later run of the same scenario replaces this one; its window still
+    # bounds the scenario before it.
+    [[ -n "$(latest_run_of "${name%%-*}")" && "$(latest_run_of "${name%%-*}")" != "$name" ]] && continue
     to=9223372036854775807
     ((i + 1 < ${#dirs[@]})) && to="${starts[i + 1]}"
     mkdir -p "$stage/$name/hooks"
@@ -1120,6 +1147,7 @@ main() {
   case "$cmd" in
     setup) cmd_setup "${args[@]}" ;;
     daemon) cmd_daemon "${args[@]}" ;;
+    profile) cmd_profile ;;
     stub) cmd_stub "${args[@]}" ;;
     scenario) cmd_scenario "${args[@]}" ;;
     spend) cmd_spend ;;

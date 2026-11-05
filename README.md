@@ -60,8 +60,8 @@ within a budget the owner sets. It never runs in CI, in the capture kit or in
 sign-in and never stores or prints a credential.
 
 `scripts/real-run` drives that run. `setup` writes the agent profile without
-a key; the operator adds `META_API_KEY` to its `[env]` and the runner never
-reads it, except inside `scan-profile`, which uses the value as the needle of
+a key (`profile` writes it again for a rerun after the profile was removed);
+the operator adds `META_API_KEY` to its `[env]` and the runner never reads it, except inside `scan-profile`, which uses the value as the needle of
 the evidence scan without printing it. The isolated daemon names an overlay
 whose CLI the host lacks in its `overlays.toml`, so it serves its local socket
 only. `scripts/real-run --help` lists the commands; a dry run against
@@ -250,16 +250,18 @@ One manual run of `scripts/real-run` on 2026-11-05: Muse Code 1.4.14 with
 off`, contributor mode off (Meta accepted the model without
 `--contributor-mode on`), through an isolated daemon of core 0.39.0, in a
 throwaway repository holding one synthetic `README.md`. Evidence in
-`compat/real/linux/<scenario>-1/`. Dialogs were answered through
-`pohunek attach`. 8 turns, 37 model calls (root, observers and the subagent).
-The spend estimate from `PostLLMCall` usage is 1.15 USD, an upper bound: all
-792,816 input tokens priced as uncached (494,548 were cache reads) and
-21,290 output plus 16,384 reasoning tokens as output, at the Muse Spark list
-price. The provider's own figure was not read.
+`compat/real/linux/<scenario>-<run>/`; scenario 1 ran a second time after
+the runner's tool check was limited to the root thread, and that run
+replaces the first one's evidence (`run.log` keeps both). Dialogs were
+answered through `pohunek attach`. 9 turns, 40 model calls (root, observers
+and the subagent). The spend estimate from `PostLLMCall` usage is 1.20 USD,
+an upper bound: all 830,963 input tokens priced as uncached (494,548 were
+cache reads) and 21,706 output plus 16,583 reasoning tokens as output, at the
+Muse Spark list price. The provider's own figure was not read.
 
 | # | Scenario | Result |
 |---|---|---|
-| 1 | Plain turn | Pass on the design condition: activity `working` then `idle`, `◆ PONG`, `SessionStart` `source=startup`, the native reference is a UUIDv7 equal to the newest session directory; 1 root step, 17 s. The root thread called no tool; the three observer threads called `submit_reminder_decision` (`PreToolUse` on their own thread ids). The runner's own extra check counted those observer calls and recorded `fail`; the check now counts the root thread only |
+| 1 | Plain turn | Pass: activity `working` then `idle`, `◆ PONG`, `SessionStart` `source=startup`, the native reference is a UUIDv7 equal to the newest session directory; 1 root step, 16 s. The root thread called no tool; the observer threads called `submit_reminder_decision` (`PreToolUse` on their own thread ids) |
 | 2 | Approval, allow once | Pass: `blocked` on `Would you like to run the following command?` with the stage argv and `Allow this stage once (y)`; Enter through attach ran `echo approval-probe > approval-probe.txt` in the repository, `◆ DONE`, `idle`; 2 root steps, 31 s; one root `PreToolUse` (`bash`, workdir the repository); no `Notification` hook for the dialog |
 | 3 | Approval, abort | Pass: the same dialog; Escape shows `denied` / `approval aborted`, no file is written, the model replies without retrying (one root `PreToolUse`), `idle` within the 60 s window after the Escape; 2 root steps, 48 s; no `Notification` hook |
 | 4 | Question picker | Pass: `request_user_input` draws `Which colour?` with `red`, `blue` and Muse's own `None of the above`; `blocked` on `Enter to select`; Enter through attach answers `red`, `◆ red`, `idle`; 2 root steps, 42 s; the picker fires a root `Notification` (`notification_type` `question_prompt`) and no `PreToolUse` |
@@ -267,7 +269,7 @@ price. The provider's own figure was not read.
 | 6 | Stop and resume | Pass: after `session stop` and `session resume` the process runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <native id>`, `SessionStart` reports `source=resume`, the answer to the follow-up question is `◆ PONG`, the reference is unchanged; 1 root step, 21 s |
 | 7 | `/clear` | Evidence, not a pass: `/clear` prints `started a fresh session` and `muse resume <old id>`; the new session's `SessionStart` (`source=clear`, a new id with its own session directory) carries no `POHUNEK_*` variable, so the reference stays on the session before `/clear` (F8, core issue C-B); `◆ FRESH`; 1 root step, 19 s |
 
-Across the run `state_source` was `osc_progress` in 84 samples, `process` in
+Across the committed runs `state_source` was `osc_progress` in 83 samples, `process` in
 3 and `screen` in 2. Under Pohunek the hook environment also held `LANG`,
 `LOGNAME`, `OLDPWD`, `SHELL` and `TMPDIR` besides the names in the Hook
 environment row. After the run the launcher had recorded no update check and

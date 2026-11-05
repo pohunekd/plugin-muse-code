@@ -20,3 +20,8 @@ scenario 7: evidence (recorded as F8 evidence, not as a pass), root steps 1/2, w
 update: no check recorded, launcher and install files unchanged
 daemon: stopped pid <pid>
 teardown: no process of this run is left
+daemon: up, pid <pid>
+profile: <home>/.config/pohunek/agents/muse_spark13.med.toml written without a real key
+scenario 1: start (run 2, agent muse_spark13.med, caps 2 steps / 120s)
+scenario 1: pass, root steps 1/2, wall 16s
+update: no check recorded, launcher and install files unchanged

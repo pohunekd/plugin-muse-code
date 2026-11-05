@@ -1,18 +1,18 @@
 {
   "scenario": "1",
-  "outcome": "fail",
+  "outcome": "pass",
   "note": "",
   "root_steps": 1,
   "step_cap": 2,
-  "wall_seconds": 17,
+  "wall_seconds": 16,
   "wall_cap": 120,
   "run_spend": {
-    "calls": 4,
-    "input_tokens": 53544,
-    "output_tokens": 1199,
-    "reasoning_tokens": 787,
-    "cached_tokens": 0,
-    "usd": 0.0753705
+    "calls": 40,
+    "input_tokens": 830963,
+    "output_tokens": 21706,
+    "reasoning_tokens": 16583,
+    "cached_tokens": 494548,
+    "usd": 1.201432
   },
   "checks": [
     {
@@ -36,8 +36,8 @@
       "ok": true
     },
     {
-      "check": "no-pretooluse",
-      "ok": false
+      "check": "no-root-pretooluse",
+      "ok": true
     }
   ]
 }
