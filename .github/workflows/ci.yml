@@ -29,7 +29,7 @@ jobs:
         run: |
           python3 -m venv "$RUNNER_TEMP/sc"
           "$RUNNER_TEMP/sc/bin/pip" install --quiet shellcheck-py==0.11.0.1
-          "$RUNNER_TEMP/sc/bin/shellcheck" scripts/capture scripts/hook-log scripts/model-stub scripts/smoke
+          "$RUNNER_TEMP/sc/bin/shellcheck" scripts/capture scripts/hook-log scripts/model-stub scripts/real-run scripts/smoke
       - name: capture dry run
         run: scripts/capture --root "$RUNNER_TEMP/capture" --dry-run all
       - name: evidence carries no credential or home path

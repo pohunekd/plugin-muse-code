@@ -1,0 +1,17 @@
+
+  Muse Code 1.4.14
+
+❯ Run exactly this shell command once, then reply DONE: echo abort-probe > abort-probe.txt                                                                                                              
+
+◆ Running your probe command.
+
+◆ Ran echo abort-probe > abort-probe.txt — denied
+  └ approval aborted
+    The user rejected this action. Don't retry it unless they ask.
+
+◆ Not done — command aborted by approval.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  muse-spark-1.3-contributor · medium · <repo> · Launch overrides

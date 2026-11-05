@@ -1,0 +1,8 @@
+{
+  "calls": 37,
+  "input_tokens": 792816,
+  "output_tokens": 21290,
+  "reasoning_tokens": 16384,
+  "cached_tokens": 494548,
+  "usd": 1.1511345
+}

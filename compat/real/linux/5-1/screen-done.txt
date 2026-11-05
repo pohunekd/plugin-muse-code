@@ -1,0 +1,20 @@
+  Muse Code 1.4.14
+
+❯ Start exactly one subagent whose only task is to reply with the word          
+  CHILD-DONE. Wait for it to finish, then reply with only the word PARENT-DONE. 
+  Do not run shell commands.                                                    
+
+◆ Starting your single child agent.
+
+◆ Spawned subagent · child-done task
+
+  (↓ to view subagents)
+
+◆ Finished · child-done task ✓
+
+◆ PARENT-DONE
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  muse-spark-1.3-contributor · medium · <repo> · Launch overrides

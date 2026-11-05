@@ -1,0 +1,35 @@
+{
+  "scenario": "2",
+  "outcome": "pass",
+  "note": "",
+  "root_steps": 2,
+  "step_cap": 4,
+  "wall_seconds": 31,
+  "wall_cap": 180,
+  "run_spend": {
+    "calls": 9,
+    "input_tokens": 170026,
+    "output_tokens": 3654,
+    "reasoning_tokens": 2629,
+    "cached_tokens": 62178,
+    "usd": 0.23923525
+  },
+  "checks": [
+    {
+      "check": "dialog-allow-once",
+      "ok": true
+    },
+    {
+      "check": "one-bash-pretooluse",
+      "ok": true
+    },
+    {
+      "check": "blocked-then-idle",
+      "ok": true
+    },
+    {
+      "check": "probe-file-written",
+      "ok": true
+    }
+  ]
+}

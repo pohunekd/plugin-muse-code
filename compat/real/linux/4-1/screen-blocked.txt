@@ -1,0 +1,24 @@
+
+
+  Muse Code 1.4.14
+
+❯ Use the request_user_input tool once to ask me "Which colour?" with exactly   
+  two options, red and blue. After I answer, reply with only the colour I       
+  picked.                                                                       
+
+◆ I'll ask which colour you prefer.
+
+◈ Request user input Colour — running (3s)                   
+
+  Which colour?                                                                 
+  
+  ⟩ 1. red                A warm, bold choice.                                  
+    2. blue               A cool, calm choice.                                 
+    3. None of the above  Optionally, add details in notes (tab).
+  
+  Enter to select · ↑/↓ to move · Tab for an optional note · Esc to interrupt
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  muse-spark-1.3-contributor · medium · <repo> · Launch overrides

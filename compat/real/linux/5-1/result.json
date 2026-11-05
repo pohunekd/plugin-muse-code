@@ -1,0 +1,35 @@
+{
+  "scenario": "5",
+  "outcome": "pass",
+  "note": "",
+  "root_steps": 3,
+  "step_cap": 6,
+  "wall_seconds": 44,
+  "wall_cap": 300,
+  "run_spend": {
+    "calls": 29,
+    "input_tokens": 685545,
+    "output_tokens": 19617,
+    "reasoning_tokens": 15474,
+    "cached_tokens": 465138,
+    "usd": 1.006068
+  },
+  "checks": [
+    {
+      "check": "subagent-completed",
+      "ok": true
+    },
+    {
+      "check": "model-subagent-start",
+      "ok": true
+    },
+    {
+      "check": "model-subagent-stop",
+      "ok": true
+    },
+    {
+      "check": "screen-PARENT-DONE",
+      "ok": true
+    }
+  ]
+}

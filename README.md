@@ -28,12 +28,14 @@ Handlers, reporters and parsers stay in the core repository
 | `scripts/capture` | Capture kit (bash, no third-party code): installs Muse into a throwaway HOME, drives it in a terminal and records what it shows |
 | `scripts/hook-log` | Hook command that logs the stdin payload and the environment names of a hook call |
 | `scripts/model-stub` | Loopback model endpoint (bash + jq) for approval and question screens without a model |
+| `scripts/real-run` | Runner of the manual run with a real Meta model (#28): isolated daemon root, counting hooks, per-scenario step and wall caps, a spend stop line, aborts on an unexpected tool, evidence redaction and the scan that gates it |
 | `compat/RELEASE` | The Muse release every capture comes from |
 | `compat/install/` | `--version`, install layout, binary sha256, the process the launcher leaves running |
 | `compat/help/` | `--help` of every command |
 | `compat/screens/<scenario>/<width>.txt` | Terminal screens at widths 20 to 200: trust, login, api-key, idle, working, done, approval, question, update-notice, clear, fork, resume, seed |
 | `compat/osc7501/` | OSC 7501 program-status records per scenario, terminal titles, the startup queries |
 | `compat/hooks/<scenario>/` | One JSON file per hook call: event, stdin payload, environment names, the `MUSE_*`/`TBH_*` values |
+| `compat/real/linux/` | Evidence of the real-model run per scenario: activity samples, screens, hook calls (long strings shortened), `ps` arguments, the runner's result; ids, paths and handshake values replaced by placeholders |
 | `compat/macos-arm64/` | The same layout for macOS arm64: install, help, the login, api-key, trust, idle, working, done and update-notice screens, OSC 7501 records and titles, the default-HOME tree and the credential backend the sessions report |
 | `compat/sessions/` | Session store tree and the first records of a session (strings over 80 characters become `<N chars>`; host fields such as pids and free disk space are dropped) |
 
@@ -56,6 +58,15 @@ isolated Pohunek daemon root, in a throwaway repository with synthetic content,
 within a budget the owner sets. It never runs in CI, in the capture kit or in
 `scripts/smoke`. That run, too, never logs in to Meta through the browser
 sign-in and never stores or prints a credential.
+
+`scripts/real-run` drives that run. `setup` writes the agent profile without
+a key; the operator adds `META_API_KEY` to its `[env]` and the runner never
+reads it, except inside `scan-profile`, which uses the value as the needle of
+the evidence scan without printing it. The isolated daemon names an overlay
+whose CLI the host lacks in its `overlays.toml`, so it serves its local socket
+only. `scripts/real-run --help` lists the commands; a dry run against
+`scripts/model-stub` (`setup --stub-port`) exercises every step without a
+model.
 
 ## Running the kit
 
@@ -154,7 +165,8 @@ Limits:
 - Fork is unsupported: Muse forks only inside its TUI (`/fork`).
 - Background observer threads (`subagent_id` ending in `-reminder`) are never
   Pohunek subagents. A subagent the model spawns is reported with no role,
-  because Muse names none on `SubagentStart` (unverified against a real model).
+  because Muse names none on `SubagentStart`: its `subagent_id` is the child's
+  session id (real run, scenario 5).
 - A Muse started by hand inside a Pohunek shell session is attributed through
   its process (`active_agent_base` `muse`), not through its session log;
   unverified end to end.
@@ -231,18 +243,51 @@ Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox prof
 
 Not captured on macOS: hooks, session resume and fork, the stub screens (no `socat`), the pane process (`ps` is refused inside the sandbox), and the default Keychain backend (the file backend was forced). The default-HOME tree (`sessions/default-home-tree.txt`) is captured. The rest stays unverified there.
 
+### Real model, Linux (#28)
+
+One manual run of `scripts/real-run` on 2026-11-05: Muse Code 1.4.14 with
+`muse-spark-1.3-contributor`, `--reasoning-effort medium`, `--approval-judge
+off`, contributor mode off (Meta accepted the model without
+`--contributor-mode on`), through an isolated daemon of core 0.39.0, in a
+throwaway repository holding one synthetic `README.md`. Evidence in
+`compat/real/linux/<scenario>-1/`. Dialogs were answered through
+`pohunek attach`. 8 turns, 37 model calls (root, observers and the subagent).
+The spend estimate from `PostLLMCall` usage is 1.15 USD, an upper bound: all
+792,816 input tokens priced as uncached (494,548 were cache reads) and
+21,290 output plus 16,384 reasoning tokens as output, at the Muse Spark list
+price. The provider's own figure was not read.
+
+| # | Scenario | Result |
+|---|---|---|
+| 1 | Plain turn | Pass on the design condition: activity `working` then `idle`, `◆ PONG`, `SessionStart` `source=startup`, the native reference is a UUIDv7 equal to the newest session directory; 1 root step, 17 s. The root thread called no tool; the three observer threads called `submit_reminder_decision` (`PreToolUse` on their own thread ids). The runner's own extra check counted those observer calls and recorded `fail`; the check now counts the root thread only |
+| 2 | Approval, allow once | Pass: `blocked` on `Would you like to run the following command?` with the stage argv and `Allow this stage once (y)`; Enter through attach ran `echo approval-probe > approval-probe.txt` in the repository, `◆ DONE`, `idle`; 2 root steps, 31 s; one root `PreToolUse` (`bash`, workdir the repository); no `Notification` hook for the dialog |
+| 3 | Approval, abort | Pass: the same dialog; Escape shows `denied` / `approval aborted`, no file is written, the model replies without retrying (one root `PreToolUse`), `idle` within the 60 s window after the Escape; 2 root steps, 48 s; no `Notification` hook |
+| 4 | Question picker | Pass: `request_user_input` draws `Which colour?` with `red`, `blue` and Muse's own `None of the above`; `blocked` on `Enter to select`; Enter through attach answers `red`, `◆ red`, `idle`; 2 root steps, 42 s; the picker fires a root `Notification` (`notification_type` `question_prompt`) and no `PreToolUse` |
+| 5 | Subagent | Pass: the model calls `subagent_spawn` and `subagent_wait`; `SubagentStart` and `SubagentStop` name the child by its session id (no role); `session list` shows one subagent with `lifecycle` `completed`, `provider` `muse`, `parent_id` equal to the root's native reference; `◆ PARENT-DONE`; 3 root steps, 44 s |
+| 6 | Stop and resume | Pass: after `session stop` and `session resume` the process runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <native id>`, `SessionStart` reports `source=resume`, the answer to the follow-up question is `◆ PONG`, the reference is unchanged; 1 root step, 21 s |
+| 7 | `/clear` | Evidence, not a pass: `/clear` prints `started a fresh session` and `muse resume <old id>`; the new session's `SessionStart` (`source=clear`, a new id with its own session directory) carries no `POHUNEK_*` variable, so the reference stays on the session before `/clear` (F8, core issue C-B); `◆ FRESH`; 1 root step, 19 s |
+
+Across the run `state_source` was `osc_progress` in 84 samples, `process` in
+3 and `screen` in 2. Under Pohunek the hook environment also held `LANG`,
+`LOGNAME`, `OLDPWD`, `SHELL` and `TMPDIR` besides the names in the Hook
+environment row. After the run the launcher had recorded no update check and
+the install files were unchanged, with the network reachable.
+
 ### Unverified
 
 - The first idle frame, the resume screens and the seed screen in a normal, non-namespaced run: unprivileged namespaces cannot map host root, so root-owned files appear owned by nobody and Muse prints the SSH-projection notice there. The footer itself is backed by `screens/done/<w>.txt` and `screens/working/<w>.txt` at every width.
 - On macOS: hooks, session resume and fork, the stub screens, and the Keychain
   credential backend.
-- A real model turn, real approval variants beyond the single-stage shell
-  command (`Always allow in this workspace`), `Notification` for approvals,
-  `PostToolUseFailure`, compaction hooks, `StopFailure`, `Interrupt`.
+- Real approval variants beyond the single-stage shell command (`Always allow
+  in this workspace`), `PostToolUseFailure`, compaction hooks, `StopFailure`,
+  `Interrupt`.
+- With a real model: transcript attribution of a Muse started outside Pohunek,
+  and `session input` refused while the approval or question dialog shows (the
+  real run answered every dialog through `pohunek attach`).
+- A real-model run on macOS.
 - When `SessionStart` is reported: the captures always include a turn, so reporting at launch versus with the first turn is not shown.
 - That `Interrupt` and `ToolUseStart` hooks need `async: true` (a startup warning in an earlier exploration, not committed).
 - The API-key prompt at width 20 (the wrapped login text defeats the kit's wait).
-- Role subagents spawned by the model (only observer subagents were seen).
 - Whether `TBH_MANAGED_HOOKS_PATH` overrides a `managed_hooks_path` set in
   `settings.json`.
 - The terminal-side update banner driven by the release manifest (`urgency`,

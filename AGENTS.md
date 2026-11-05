@@ -28,7 +28,9 @@ under epic `zajca/pohunek#1644`; this repository's issues are P0-P5.
   real HOME, never use privileged or systemd containers, never use sudo.
 - **Evidence is data, not prose.** Everything under `compat/` comes from
   `scripts/capture` on the release named in `compat/RELEASE`, redacted by the
-  script. Do not edit captures by hand; re-run the script.
+  script; `compat/real/` comes from `scripts/real-run` (the manual run of
+  #28), redacted and scanned by it. Do not edit captures by hand; re-run the
+  script.
 - **Mark what is unverified.** A claim without a capture says `unverified`
   (or `prior art only`) in README and in the issue comment that records it.
 - **Docs in the same PR** as the behaviour they describe.
@@ -48,6 +50,7 @@ scripts/capture --root <dir> --dry-run all   # plan and tool check, no network
 scripts/capture --root <dir> all             # install the CLI and capture everything
 (cd kit && cargo test --locked)              # package checks against core (kit stand-in)
 scripts/smoke --root <dir> --core-bin <dir> --muse-dir <dir>   # end-to-end, isolated
+scripts/real-run --help                      # the manual real-model run of #28 (operator only)
 ```
 
 `package/` holds exactly the two files of the archive. `kit/` stands in for the
