@@ -8,7 +8,7 @@ schema = 1
 id = "pohunek.runtime.muse"
 version = "0.1.0"
 runtime_api = 1
-requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1"]
+requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1", "config-home-subdir-v1", "integration-muse-hook-v1"]
 
 [runtime]
 id = "muse"
@@ -47,11 +47,30 @@ ready = "screen_idle"
 # it unseen; the operator answers through `session attach`.
 refuse_while_blocked = true
 
+# `muse resume <id>` continues a stopped session in its workspace; the hook
+# overlay's `-c` arguments come before `resume`.
 [resume]
-supported = false
+supported = true
+reference_kind = "id"
+args = ["resume", "{reference}"]
 
+# Muse forks only inside its TUI (`/fork`); no launch argument forks.
 [fork]
 supported = false
 
+# Muse chooses the session id; the root thread's SessionStart hook reports it
+# with the first turn. After `/clear` Muse 1.4.14 runs that hook without the
+# Pohunek variables, so the reference stays on the session before `/clear`.
 [native_reference]
-strategy = "none"
+strategy = "hook"
+
+[integration]
+handler = "muse-hook-v1"
+hook_schema = "identity-subagent-v1"
+
+# Muse reads `settings.json`, and the managed hooks file it may name, from
+# `$XDG_CONFIG_HOME/muse`, else `~/.config/muse`.
+[config_home]
+env = "XDG_CONFIG_HOME"
+subdir = "muse"
+default = ".config/muse"

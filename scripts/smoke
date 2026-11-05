@@ -248,6 +248,35 @@ wait_for "the second reply on screen" second_seen
 wait_for "the echo session to read idle again" want_activity echo idle
 log "second turn: working observed, idle again"
 
+# --- 2b. identity, reminder threads, resume -------------------------------
+sessions_root="$HOME_DIR/.local/share/muse/sessions"
+hook_trace="$HOME_DIR/.local/state/pohunek/logs/pohunek-hooks.jsonl"
+native_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .native_session_id // empty'; }
+bound() { [[ -n "$(native_of echo)" ]]; }
+wait_for "the SessionStart report to bind the echo session" bound
+echo_native="$(native_of echo)"
+echo_log="$(find "$sessions_root" -mindepth 5 -maxdepth 5 -path "*/$echo_native/session.jsonl" -print -quit)"
+[[ -n "$echo_log" ]] || die "no Muse session log for $echo_native"
+reminders_seen() { grep -q '"reason":"reminder_thread"' "$hook_trace"; }
+wait_for "the reminder threads to be filtered" reminders_seen
+[[ "$(pk session list --json | jq -r '.ok[] | select(.name == "echo") | (.subagents // []) | length')" == 0 ]] ||
+  die "a reminder thread became a subagent"
+log "identity: bound to the Muse session, reminder threads filtered"
+pk session stop "$echo_id" >/dev/null
+pk session resume "$echo_id" >/dev/null
+wait_for "the resumed session to read idle" want_activity echo idle
+resumed_pid="$(muse_pid_of echo)"
+resumed_args="$(tr '\0' ' ' <"/proc/$resumed_pid/cmdline")"
+[[ "$resumed_args" == *' -c managed_hooks_env_vars=["POHUNEK_ENV",'*'] resume '"$echo_native"' ' ]] ||
+  die "unexpected resume arguments: $resumed_args"
+[[ "$(readlink "/proc/$resumed_pid/cwd")" == "$WS" ]] || die "the resumed Muse runs outside the workspace"
+pk session input "$echo_id" "after resume" >/dev/null
+after_resume() { pk session screen "$echo_id" | grep -q 'echo: after resume'; }
+wait_for "the reply after resume" after_resume
+wait_for "the echo session to read idle after resume" want_activity echo idle
+[[ "$(native_of echo)" == "$echo_native" ]] || die "the resumed session changed its native reference"
+log "resume: muse resume <id> in the workspace with the overlay, same reference"
+
 # --- 3. the launcher never reached the update path ------------------------
 bin="$HOME_DIR/.local/bin"
 [[ ! -e "$bin/.muse-update-checked-at" ]] || die "the launcher recorded an update check"

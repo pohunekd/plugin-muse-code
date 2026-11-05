@@ -82,10 +82,26 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
     );
     assert_eq!(
         definition.native_reference_strategy(),
-        NativeReferenceStrategy::None,
-        "resume stays off until a hook capture verifies it"
+        NativeReferenceStrategy::Hook,
+        "the root thread's SessionStart hook reports the Muse session id"
     );
-    assert!(definition.integration_handler().is_none());
+    assert_eq!(
+        definition
+            .integration_handler()
+            .map(|handler| handler.as_str()),
+        Some("muse-hook-v1")
+    );
+    assert_eq!(
+        format!("{:?}", definition.native()),
+        r#"Some(NativeSessionLaunch { reference_kind: Id, resume_args: NativeArgs([Literal("resume"), Reference]), fork_args: None, assigned: None })"#
+    );
+    let home = definition
+        .config_home()
+        .expect("the descriptor declares the Muse config home");
+    assert_eq!(
+        (home.env(), home.subdir(), home.default_relative()),
+        ("XDG_CONFIG_HOME", Some("muse"), ".config/muse")
+    );
     let program_status = definition
         .manifest()
         .program_status()
