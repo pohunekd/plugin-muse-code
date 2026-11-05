@@ -98,6 +98,9 @@ require_tools() {
     done
   else
     tools+=(unshare socat ip mount hostname)
+    if [[ "${CAPTURE_VM:-}" == 1 ]]; then
+      tools+=(systemd-detect-virt)
+    fi
   fi
   for tool in "${tools[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -931,7 +934,19 @@ main() {
   # loopback interface, so no capture can reach Meta. Inside it the capture
   # root is bound to a fixed path, the hook scripts are copied into it, a
   # synthetic passwd/group names the caller `capture`, and the
-  # CLI runs under the caller's uid in a nested user namespace.
+  # CLI runs under the caller's uid in a nested user namespace. With
+  # CAPTURE_VM=1 the guest is the isolation instead (vm_guard); it has no
+  # network, so the CLI is copied into <root>/fakehome/.local/bin beforehand.
+  if [[ "${CAPTURE_VM:-}" == 1 && -z "${CAPTURE_IN_NETNS:-}" ]]; then
+    vm_guard
+    for arg in "${steps[@]}"; do
+      [[ "$arg" != install ]] || die "CAPTURE_VM=1 cannot run the install step"
+    done
+    CAPTURE_HOST_USER="$(id -un)"
+    CAPTURE_HOST_HOSTNAME="$(hostname)"
+    export CAPTURE_IN_NETNS=1 CAPTURE_NS_STAGE=vm CAPTURE_HOST_ROOT="$ROOT" CAPTURE_HOST_HOME="$HOME" \
+      CAPTURE_HOST_USER CAPTURE_HOST_HOSTNAME
+  fi
   if [[ "$PLATFORM" == Darwin && -z "${CAPTURE_IN_NETNS:-}" ]]; then
     # No namespaces on macOS: the steps run under a sandbox profile that denies
     # all network access, including loopback.
@@ -999,6 +1014,21 @@ main() {
     OUT="$OUT_FINAL"
     swap_step "$arg" "$stage"
   done
+}
+
+# vm_guard: CAPTURE_VM=1 runs the steps without namespaces, so the VM itself is
+# the isolation: a KVM or QEMU guest with only a loopback interface, a normal
+# user and the fixed capture root. Host root files then keep their owner, which
+# an unprivileged user namespace cannot map.
+vm_guard() {
+  local virt links
+  [[ "$PLATFORM" == Linux ]] || die "CAPTURE_VM=1 is for a Linux guest"
+  virt="$(systemd-detect-virt --vm 2>/dev/null)" || die "CAPTURE_VM=1 outside a virtual machine"
+  [[ "$virt" == kvm || "$virt" == qemu ]] || die "CAPTURE_VM=1 in an unexpected hypervisor: $virt"
+  links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
+  [[ "$links" == "lo " ]] || die "the VM has network interfaces: $links"
+  (($(id -u) != 0)) || die "CAPTURE_VM=1 runs as a normal user"
+  [[ "$ROOT" == /run/capture-root ]] || die "CAPTURE_VM=1 needs --root /run/capture-root"
 }
 
 # assert_isolated: only a loopback interface exists and no host path is mapped.
