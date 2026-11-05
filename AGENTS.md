@@ -16,10 +16,13 @@ under epic `zajca/pohunek#1644`; this repository's issues are P0-P5.
 
 ## Rules
 
-- **No credentials, no real model.** No Meta API key exists for this project and
-  none will. Never log in to Meta, never press Enter on the browser sign-in entry
-  (it starts a device-code request at Meta), never store or print a credential,
-  never call a real model. Model-free turns use `--provider echo`.
+- **No credentials; a real model only in the manual verification run.** CI, the
+  capture kit and `scripts/smoke` never call a real model; their turns use
+  `--provider echo` or `scripts/model-stub`. A real Meta model runs only in the
+  manual verification run of #28: an isolated daemon root, a throwaway
+  repository with synthetic content, a budget the owner sets. Never log in to
+  Meta through the browser sign-in (Enter on that entry starts a device-code
+  request at Meta), never store or print a credential.
 - **Disposable environment only.** The Muse CLI runs in a throwaway HOME below
   `--root` of `scripts/capture`, or in a qemu/KVM VM. Never install it into a
   real HOME, never use privileged or systemd containers, never use sudo.

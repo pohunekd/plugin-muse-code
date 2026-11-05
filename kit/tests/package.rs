@@ -62,9 +62,10 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
         definition.program(),
         &LaunchProgram::Fixed("muse".to_owned())
     );
-    assert!(
-        definition.default_args().is_empty(),
-        "the descriptor never trusts a workspace"
+    assert_eq!(
+        definition.default_args(),
+        ["--trust-workspace"],
+        "every launch trusts the registered workspace"
     );
     assert!(
         !definition.prompt_arg(),
