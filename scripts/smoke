@@ -40,6 +40,11 @@ FAST_POLL_SECONDS=0.25
 WORKING_POLLS=$((WAIT_SECONDS * 4))
 # Bound on waiting for the daemon after teardown.
 REAP_SECONDS=10
+# Time a refused input gets to reach Muse before the trust list is checked.
+REFUSAL_SETTLE_SECONDS=2
+# Characters a path may hold where it becomes program text of the inner
+# `bash -c` and part of a socat address (`:` and `,` separate socat options).
+SAFE_PATH_RE='^[A-Za-z0-9._/+-]+$'
 
 ROOT="" CORE_BIN="" MUSE_DIR=""
 DAEMON_PID=""
@@ -49,6 +54,9 @@ log() { printf 'smoke: %s\n' "$*" >&2; }
 die() {
   log "FAIL: $*"
   exit 1
+}
+safe_path() { # <what> <path>
+  [[ "$2" =~ $SAFE_PATH_RE ]] || die "$1 holds a character the namespace command cannot carry (allowed: letters, digits, . _ + - /): $2"
 }
 
 usage() {
@@ -66,6 +74,8 @@ while (($# > 0)); do
   esac
 done
 [[ -n "$ROOT" && -n "$CORE_BIN" && -n "$MUSE_DIR" ]] || usage
+safe_path --root "$ROOT"
+safe_path "the checkout path" "$REPO"
 
 for tool in unshare ip jq sha256sum cp git readlink sed socat; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
@@ -79,6 +89,8 @@ done
 MARKER=".muse-plugin-smoke-root"
 mkdir -p "$ROOT"
 ROOT="$(cd "$ROOT" && pwd -P)"
+# A symlinked --root resolves to a path that needs the same check.
+safe_path "the resolved --root" "$ROOT"
 if [[ -n "$(ls -A "$ROOT")" && ! -e "$ROOT/$MARKER" ]]; then
   die "$ROOT is not empty and was not created by this script"
 fi
@@ -225,7 +237,7 @@ tr '\0' '\n' <"/proc/$bare_pid/environ" | grep -qx 'MUSE_NO_AUTO_UPDATE=1' || di
 [[ "$(readlink "/proc/$bare_pid/ns/net")" == "$NETNS" ]] || die "Muse is not in the loopback-only namespace"
 refusal="$(pk session input "$(session_id bare)" "hello" --json || true)"
 [[ "$(jq -r '.err.code' <<<"$refusal")" == session_input_blocked ]] || die "input reached the trust dialog: $refusal"
-sleep 2
+sleep "$REFUSAL_SETTLE_SECONDS"
 [[ ! -e "$HOME_DIR/.config/muse/trust.json" ]] || die "the workspace was trusted without the operator"
 log "bare launch: trust dialog blocks, input refused, nothing trusted, update flag set"
 pk session stop "$(session_id bare)" >/dev/null
@@ -278,12 +290,16 @@ resumed_args="$(tr '\0' ' ' <"/proc/$resumed_pid/cmdline")"
 [[ "$resumed_args" == *' -c managed_hooks_env_vars=["POHUNEK_ENV",'*'] resume '"$echo_native"' ' ]] ||
   die "unexpected resume arguments: $resumed_args"
 [[ "$(readlink "/proc/$resumed_pid/cwd")" == "$WS" ]] || die "the resumed Muse runs outside the workspace"
+# Names only: the values are the session's own and are never printed.
+for name in TBH_MANAGED_HOOKS_PATH POHUNEK_SESSION_ID; do
+  tr '\0' '\n' <"/proc/$resumed_pid/environ" | grep -q "^$name=" || die "$name is not in the resumed launch environment"
+done
 pk session input "$echo_id" "after resume" >/dev/null
 after_resume() { pk session screen "$echo_id" | grep -q 'echo: after resume'; }
 wait_for "the reply after resume" after_resume
 wait_for "the echo session to read idle after resume" want_activity echo idle
 [[ "$(native_of echo)" == "$echo_native" ]] || die "the resumed session changed its native reference"
-log "resume: muse resume <id> in the workspace with the overlay, same reference"
+log "resume: muse resume <id> in the workspace with the overlay and its environment, same reference"
 
 # --- 3. the launcher never reached the update path ------------------------
 bin="$HOME_DIR/.local/bin"
