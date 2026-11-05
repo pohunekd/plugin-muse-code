@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P1)**: launch and program status only; no hooks, no resume, no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
+| Status | **pre-release (P2)**: launch, program status, session identity, resume and subagents; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -123,9 +123,19 @@ Limits:
   back: start it without `--input`, answer the dialog in `pohunek attach`, then
   send input. Muse keeps the answer per workspace root, so a new worktree asks
   again (architect probe, not a kit capture).
-- No native session reference: resume and fork are off until a hook capture
-  verifies them (P2). A Muse the user starts by hand reports through its
-  process and screen only.
+- Session identity comes from the root thread's `SessionStart` hook, which Muse
+  reports with a turn (no capture shows one before the first turn): a session
+  stopped before its first turn has no reference, and `session resume` refuses
+  it (`native_identity_missing`).
+- `/clear` does not move the reference on Muse 1.4.14: Muse runs the new
+  session's hooks without the variables passed by `-c managed_hooks_env_vars`,
+  so the reporter cannot reach its session, and `session resume` continues the
+  conversation from before `/clear` (core issue pending).
+- Fork is unsupported: Muse forks only inside its TUI (`/fork`).
+- Background observer threads (`subagent_id` ending in `-reminder`) are never
+  Pohunek subagents. A subagent the model spawns is reported with no role,
+  because Muse names none on `SubagentStart` (unverified against a real model).
+- A Muse the user starts by hand reports through its process and screen only.
 - `Always allow in this workspace` is in the approval rule from prior art and
   is unverified. No rule names the approval profiles (`Ask me`, `Read-only`,
   `Unrestricted`); only `Auto-review` appears in a capture, in a footer no rule
@@ -174,6 +184,7 @@ unverified.
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
 | Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working |
 | Launch (P1, `scripts/smoke`) | Through a pohunek build of core `368a2d32c` (v0.39.0) in a loopback-only namespace: `--agent muse` launches `muse-bin-<release>` without `--trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, reads `blocked` on the trust dialog, refuses `session input` with `session_input_blocked` and leaves no `trust.json`; with a profile that adds `--trust-workspace --provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
+| Identity and resume (P2, `scripts/smoke`) | With `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with the reference unchanged |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
 
 ### macOS arm64
