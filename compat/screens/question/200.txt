@@ -3,7 +3,7 @@
 
 ❯ please STUB_ASK
 
-◆ Request user input Scope — running (0s)
+◇ Request user input Scope — running (0s)
 
   Which scope should the change cover?
 

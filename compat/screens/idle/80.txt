@@ -4,4 +4,4 @@
 ────────────────────────────────────────────────────────────────────────────────
 ❯
 ────────────────────────────────────────────────────────────────────────────────
-  echo system SSH configuration projection omitted: source ownership, mode or t…
+  echo · /capture-root____/s/turn/ws · Auto-review

@@ -4,4 +4,4 @@
 ────────────────────
 ❯
 ────────────────────
-  echo system SSH c…
+  echo · Auto-review
