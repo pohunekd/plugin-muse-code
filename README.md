@@ -92,8 +92,9 @@ The profile does not confine the filesystem: the CLI can still read the real use
 
 On Linux, `CAPTURE_VM=1` runs the steps without namespaces inside a KVM or QEMU
 guest that has no network interface (a `-nic none` VM), as a normal user with
-`--root /run/capture-root`; the kit refuses it anywhere else. The idle, resume
-and seed screens come from such a run.
+`--root /run/capture-root`; the kit refuses it anywhere else. The evidence of
+the `turn`, `sessions` and `stub` steps, the idle, resume and seed screens
+among it, comes from such a run.
 
 To recapture in a VM (the run behind `turn`, `sessions` and `stub` used the
 Debian 13 `genericcloud` image `20261103-2651`, checked against its
@@ -264,7 +265,7 @@ Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox prof
 |---|---|
 | Release | Same release `1.4.14-R7309.1` and the same launcher (sha256 equal); the binary is a 423,687,488-byte Mach-O build |
 | OSC 7501 | Identical to Linux: probe `ESC ] 7501 ; ? ESC \` at startup, records only after it is answered, `app=muse`, states `idle`, `working`, `done`; terminal title is the directory name with a braille spinner while working |
-| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame has no SSH-projection notice |
+| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯` |
 | Launcher notice | `Muse Code updated A -> B` as on Linux |
 | Credential backend | With `TBH_CREDENTIAL_BACKEND=file` the session record reports `credential_backend` `file` and `keychain_fallback_reason` `none`, in the default-HOME run and in the turn scenario |
 
