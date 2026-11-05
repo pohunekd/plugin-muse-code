@@ -90,6 +90,30 @@ On macOS the kit runs the screen and OSC steps (`install version login trust tur
 
 The profile does not confine the filesystem: the CLI can still read the real user's home and write below its `~/Library`, so a dedicated throwaway user or a VM would be stronger. The default-HOME tree on macOS lacks the `runtime/` and `session-server` entries of the Linux run.
 
+On Linux, `CAPTURE_VM=1` runs the steps without namespaces inside a KVM or QEMU
+guest that has no network interface (a `-nic none` VM), as a normal user with
+`--root /run/capture-root`; the kit refuses it anywhere else. The evidence of
+the `turn`, `sessions` and `stub` steps, the idle, resume and seed screens
+among it, comes from such a run.
+
+To recapture in a VM (the run behind `turn`, `sessions` and `stub` used the
+Debian 13 `genericcloud` image `20261103-2651`, checked against its
+`SHA512SUMS`, on KVM with 2 vCPUs and 4 GiB):
+
+- Boot the image once with a network device and only install the tools
+  (tmux, jq, socat, perl, git, curl, iproute2, procps, util-linux,
+  bubblewrap) and add a normal user whose home is
+  `/run/capture-root/fakehome`; no Muse, repository or key is in the guest yet.
+- Boot it again with `-nic none` and hand in a plain tar of the repository and
+  the four install files of `compat/install/layout.txt` on a read-only disk.
+  Bind a directory on the guest disk onto `/run/capture-root` (the guest's
+  `/run` tmpfs is smaller than the binary) and copy the install files to
+  `/run/capture-root/fakehome/.local/bin`.
+- As that user, with a UTF-8 locale, run
+  `CAPTURE_VM=1 scripts/capture --root /run/capture-root turn sessions stub`,
+  write `compat/` to a second disk, and copy each `step_owned` path over the
+  repository's.
+
 A new Muse release is captured by re-running the kit before the lock moves:
 `supported.below` stays at the next minor until the new captures pass.
 
@@ -210,7 +234,7 @@ unverified.
 | Install | Launcher script `muse` plus `.muse-version`, `.muse-release-info.json` and the static binary `muse-bin-<release>`; the pane process is the binary, so `comm` is `muse-bin-<release>` truncated by the kernel |
 | Trust dialog | `Do you trust this workspace?` with `1  Trust and continue` / `2  Quit`; `--trust-workspace` skips it and writes no `trust.json` (`scripts/smoke`) |
 | Login | Two entries, `Log in with browser` and `Set an API key`; the key prompt reads `Paste your Model API key.` |
-| Idle | Composer prompt `❯`, footer `<model> · <cwd> · Auto-review`; the first idle frame, resume and seed screens of these captures also carry `system SSH configuration projection omitted: source ownership, mode or type does not qualify` (a capture artefact, see Unverified); `⟩` is the cursor of dialogs and pickers, not the idle prompt |
+| Idle | Composer prompt `❯`, footer `<model> · <cwd> · Auto-review`; `⟩` is the cursor of dialogs and pickers, not the idle prompt |
 | Working | `◇`/`◈ Thinking (Ns · esc to interrupt)`, also `Calling tools`, `Double checking`, `Request user input <header> — running` (glyph alternates) |
 | Approval (stub) | `Would you like to run the following command?` with `Allow this stage once (y)` and `Abort the entire command (esc)` |
 | Question picker (stub) | `Enter to select · ↑/↓ to move · Tab for an optional note · Esc to interrupt` |
@@ -241,7 +265,7 @@ Captured on a macOS 27.0.1 arm64 host in a throwaway HOME under the sandbox prof
 |---|---|
 | Release | Same release `1.4.14-R7309.1` and the same launcher (sha256 equal); the binary is a 423,687,488-byte Mach-O build |
 | OSC 7501 | Identical to Linux: probe `ESC ] 7501 ; ? ESC \` at startup, records only after it is answered, `app=muse`, states `idle`, `working`, `done`; terminal title is the directory name with a braille spinner while working |
-| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯`, and the first idle frame has no SSH-projection notice |
+| Screens | Trust, login and api-key (not at width 20) screens match Linux. The idle, working and done composers carry an extra divider row `── Voice input (⌥ + v to start) ──` above `❯` |
 | Launcher notice | `Muse Code updated A -> B` as on Linux |
 | Credential backend | With `TBH_CREDENTIAL_BACKEND=file` the session record reports `credential_backend` `file` and `keychain_fallback_reason` `none`, in the default-HOME run and in the turn scenario |
 
@@ -292,7 +316,6 @@ the install files were unchanged, with the network reachable.
 
 ### Unverified
 
-- The first idle frame, the resume screens and the seed screen in a normal, non-namespaced run: unprivileged namespaces cannot map host root, so root-owned files appear owned by nobody and Muse prints the SSH-projection notice there. The footer itself is backed by `screens/done/<w>.txt` and `screens/working/<w>.txt` at every width.
 - On macOS: hooks, session resume and fork, the stub screens, and the Keychain
   credential backend.
 - Real approval variants beyond the single-stage shell command (`Always allow

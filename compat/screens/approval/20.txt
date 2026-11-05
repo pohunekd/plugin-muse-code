@@ -3,7 +3,7 @@
 
 ❯ please STUB_TOOL
 
-◈ Calling tools (13s
+◇ Calling tools (13s
 
 ────────────────────
 Would you like to ru

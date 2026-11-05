@@ -3,7 +3,7 @@
 
 ❯ please STUB_TOOL
 
-◈ Calling tools (13s · esc to interrupt)
+◇ Calling tools (13s · esc to interrupt)
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 Would you like to run the following command?

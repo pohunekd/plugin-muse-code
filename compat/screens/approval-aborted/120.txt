@@ -9,7 +9,7 @@
 
 ◆ stub reply
 
-◆ Double checking (17s · esc to interrupt)
+◈ Double checking (17s · esc to interrupt)
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯

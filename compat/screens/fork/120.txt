@@ -5,10 +5,10 @@
 
 ◆ echo: first turn
 
-  Fork created: 01a17f20-5ca6-79f0-83ec-562a56ef53ee
+  Fork created: 01a1adbe-71b2-7561-aa5a-438c585147f9
   Source session stays active.
   Continue the fork:
-  muse resume 01a17f20-5ca6-79f0-83ec-562a56ef53ee
+  muse resume 01a1adbe-71b2-7561-aa5a-438c585147f9
 
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ❯
