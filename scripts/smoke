@@ -6,7 +6,7 @@
 # The daemon, its workers and Muse run in a network namespace that has only a
 # loopback interface, with their own HOME and XDG roots below --root. No
 # credential, no login and no real model is involved: the working turn uses
-# Muse's own `--provider echo`, and the sign-in screen is only looked at, never
+# Muse's own `--provider echo`, and the trust dialog is only looked at, never
 # answered.
 #
 #   scripts/smoke --root DIR --core-bin DIR --muse-dir DIR
@@ -189,8 +189,8 @@ pk plugin enable dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
 pk plugin select dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
 pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
 
-# A profile replaces the descriptor's arguments, so it restates
-# --trust-workspace and adds the credential-free provider.
+# A profile replaces the descriptor's arguments; this synthetic workspace is the
+# operator's own, so the profile trusts it and adds the credential-free provider.
 cat >"$HOME_DIR/.config/pohunek/agents/muse-echo.toml" <<EOF
 base = "muse"
 package = "dev.runtime.muse"
@@ -205,18 +205,21 @@ session_id() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name
 muse_pid_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .pid'; }
 want_activity() { [[ "$(activity_of "$1")" == "$2" ]]; }
 
-# --- 1. bare launch: no trust dialog, sign-in blocks, nothing is answered -
+# --- 1. bare launch: the trust dialog blocks and refuses input ------------
 pk session new --agent muse --cwd "$WS" --name bare --yes >/dev/null
 wait_for "the bare session to read blocked" want_activity bare blocked
 bare_screen="$(pk session screen "$(session_id bare)")"
-grep -qi 'Log in with browser' <<<"$bare_screen" || die "the bare session does not show the sign-in choice"
-grep -qi 'trust this workspace' <<<"$bare_screen" && die "the trust dialog appeared despite --trust-workspace"
+grep -q 'Do you trust this workspace?' <<<"$bare_screen" || die "the bare session does not show the trust dialog"
 bare_pid="$(muse_pid_of bare)"
 args="$(tr '\0' ' ' <"/proc/$bare_pid/cmdline")"
-[[ "$args" == *"muse-bin-"*" --trust-workspace "* ]] || die "unexpected launch arguments: $args"
+[[ "$args" == *"muse-bin-"* && "$args" != *"--trust-workspace"* ]] || die "unexpected launch arguments: $args"
 tr '\0' '\n' <"/proc/$bare_pid/environ" | grep -qx 'MUSE_NO_AUTO_UPDATE=1' || die "MUSE_NO_AUTO_UPDATE=1 is not in the launch environment"
 [[ "$(readlink "/proc/$bare_pid/ns/net")" == "$NETNS" ]] || die "Muse is not in the loopback-only namespace"
-log "bare launch: blocked on the sign-in choice, trust dialog skipped, update flag set"
+refusal="$(pk session input "$(session_id bare)" "hello" --json || true)"
+[[ "$(jq -r '.err.code' <<<"$refusal")" == session_input_blocked ]] || die "input reached the trust dialog: $refusal"
+sleep 2
+[[ ! -e "$HOME_DIR/.config/muse/trust.json" ]] || die "the workspace was trusted without the operator"
+log "bare launch: trust dialog blocks, input refused, nothing trusted, update flag set"
 pk session stop "$(session_id bare)" >/dev/null
 
 # --- 2. echo turn: composer ready, input accepted, working then idle ------

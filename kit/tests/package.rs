@@ -62,7 +62,10 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
         definition.program(),
         &LaunchProgram::Fixed("muse".to_owned())
     );
-    assert_eq!(definition.default_args(), ["--trust-workspace"]);
+    assert!(
+        definition.default_args().is_empty(),
+        "the descriptor never trusts a workspace"
+    );
     assert!(
         !definition.prompt_arg(),
         "the prompt is typed once the composer is drawn"
@@ -73,6 +76,10 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
     );
     assert_eq!(definition.input_readiness(), InputReadiness::ScreenIdle);
     assert!(definition.input_rules().bracketed_paste);
+    assert!(
+        format!("{:?}", definition.input_rules()).ends_with("allow_while_blocked: false }"),
+        "input is refused while a Muse dialog shows"
+    );
     assert_eq!(
         definition.native_reference_strategy(),
         NativeReferenceStrategy::None,
@@ -200,6 +207,7 @@ fn detector_for(definition: &RuntimeDefinition, now: Instant, rows: u16, columns
             },
             manifest: Some(std::sync::Arc::clone(definition.manifest())),
             input_readiness: definition.input_readiness(),
+            launch_name: None,
         },
     )
 }

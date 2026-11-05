@@ -9,11 +9,11 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P1)**: launch and program status only; no hooks, no resume, no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `680c35b86` (see `kit/Cargo.toml`) |
+| Status | **pre-release (P1)**: launch and program status only; no hooks, no resume, no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
-It needs a core with the runtime features `version-probe-revision-v1` and
-`launch-env-v1` (core 0.38 or a build of `main` that has them).
+It needs a core with every runtime feature its descriptor lists in `requires`
+(`package/runtime.toml`); core 0.39.0 has all of them.
 Handlers, reporters and parsers stay in the core repository
 [`zajca/pohunek`](https://github.com/zajca/pohunek); the plan is the epic
 `zajca/pohunek#1644` and the issues P0-P5 of this repository.
@@ -96,9 +96,16 @@ work.
 
 What the package does:
 
-- Launches `muse --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1`. A trusted
-  workspace loads project hooks and rules, and project hooks run outside
-  Muse's sandbox (owner decision Q5, 2026-10-26: always trust).
+- Launches `muse` with `MUSE_NO_AUTO_UPDATE=1` and never trusts a workspace
+  itself (owner ruling on #18, 2026-10-29: no `--trust-workspace` on a fork or
+  a foreign PR checkout, and unknown provenance counts as foreign). A trusted
+  workspace loads project hooks, rules and skills, and project hooks run
+  outside Muse's sandbox. The trust dialog reads `blocked` until the operator
+  answers it in `pohunek attach`.
+- Refuses `session input` with `session_input_blocked` while any dialog shows
+  (trust, sign-in, API key, approval, question): Muse takes Enter as the choice
+  of the preselected entry, so text sent while one shows would trust the
+  workspace or allow a command unseen.
 - Accepts the release range `[1.4.14, 1.5.0)`, read from
   `Muse Code <release> (<release>-R<n>.<m>)`; the leading release is compared.
 - Reports `idle`, `working` and `blocked` from the screen (composer, status
@@ -108,8 +115,14 @@ What the package does:
 
 Limits:
 
-- A host profile's `args` replace the descriptor's, so a profile over `muse`
-  restates `--trust-workspace`.
+- A host profile's `args` replace the descriptor's. A profile for checkouts the
+  operator owns may add `--trust-workspace`; never use it on a fork or a foreign
+  PR checkout.
+- `session new --input` in a workspace Muse does not trust yet fails with
+  `session_input_not_ready` after the startup grace, and the session is rolled
+  back: start it without `--input`, answer the dialog in `pohunek attach`, then
+  send input. Muse keeps the answer per workspace root, so a new worktree asks
+  again (architect probe, not a kit capture).
 - No native session reference: resume and fork are off until a hook capture
   verifies them (P2). A Muse the user starts by hand reports through its
   process and screen only.
@@ -160,7 +173,7 @@ unverified.
 | Prompt seed | `muse "<prompt>"` submits the prompt as the first turn |
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
 | Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working |
-| Launch (P1, `scripts/smoke`) | Through a pohunek build of core `680c35b86` in a loopback-only namespace: `--agent muse` launches `muse-bin-<release> --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, shows no trust dialog, reads `blocked` on the sign-in choice (never answered); with `--provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
+| Launch (P1, `scripts/smoke`) | Through a pohunek build of core `368a2d32c` (v0.39.0) in a loopback-only namespace: `--agent muse` launches `muse-bin-<release>` without `--trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, reads `blocked` on the trust dialog, refuses `session input` with `session_input_blocked` and leaves no `trust.json`; with a profile that adds `--trust-workspace --provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
 
 ### macOS arm64

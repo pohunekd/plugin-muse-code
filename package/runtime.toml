@@ -8,16 +8,18 @@ schema = 1
 id = "pohunek.runtime.muse"
 version = "0.1.0"
 runtime_api = 1
-requires = ["version-probe-revision-v1", "launch-env-v1"]
+requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1"]
 
 [runtime]
 id = "muse"
 name = "Muse Code"
 program = "muse"
-# The workspace is always trusted, so the trust dialog does not hold a launch.
-# A trusted workspace loads project hooks and rules, and project hooks run
-# outside Muse's sandbox.
-args = ["--trust-workspace"]
+# Muse asks "Do you trust this workspace?" before it loads project hooks,
+# rules and skills, and project hooks run outside its sandbox. The descriptor
+# never trusts a checkout: the dialog reads blocked until the operator answers
+# it. A host profile for checkouts the operator owns may add
+# `--trust-workspace`.
+args = []
 detect_manifest = "detect.toml"
 # Typed into the composer once it is drawn: a positional argument would let a
 # prompt such as `logout` select a subcommand.
@@ -40,6 +42,10 @@ bracketed_paste = true
 submit_delay_ms = 150
 text_policy = "unrestricted"
 ready = "screen_idle"
+# Every Muse dialog (trust, sign-in, approval, question) takes Enter as the
+# choice of its preselected entry, so text sent while one shows would answer
+# it unseen; the operator answers through `session attach`.
+refuse_while_blocked = true
 
 [resume]
 supported = false
