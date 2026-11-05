@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: launch, program status, session identity, resume, subagents and transcript attribution; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
+| Status | **pre-release (P3)**: launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -104,8 +104,9 @@ What the package does:
   answers it in `pohunek attach`.
 - Refuses `session input` with `session_input_blocked` while any dialog shows
   (trust, sign-in, API key, approval, question): Muse takes Enter as the choice
-  of the preselected entry, so text sent while one shows would trust the
-  workspace or allow a command unseen.
+  of the preselected entry, so text sent while the trust dialog shows would
+  trust the workspace unseen. That input on the approval and question dialogs
+  would allow a command unseen is unverified.
 - Accepts the release range `[1.4.14, 1.5.0)`, read from
   `Muse Code <release> (<release>-R<n>.<m>)`; the leading release is compared.
 - Reports `idle`, `working` and `blocked` from the screen (composer, status
@@ -113,8 +114,10 @@ What the package does:
   terminal title, and from OSC 7501 records (`app=muse`, the probe is answered).
 - Reads Muse's session logs below `$XDG_DATA_HOME/muse/sessions` (else
   `~/.local/share/muse/sessions`), `YYYY/MM/DD/<uuid>/session.jsonl`, to attribute
-  a Muse the user runs outside Pohunek. Recovery refuses a session whose
-  `<uuid>/session.jsonl` is gone (`agent_native_reference_missing`).
+  a Muse the user runs outside Pohunek; the kit checks the declared parser and
+  root, and no run attributes such a Muse end to end (unverified). Recovery
+  refuses a session whose `<uuid>/session.jsonl` is gone
+  (`agent_native_reference_missing`).
 - Types the first prompt once the composer is drawn (`ready = "screen_idle"`); the prompt is not an argument, so a prompt such as `logout` never selects a subcommand.
 
 Limits:
@@ -196,7 +199,8 @@ unverified.
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
 | Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working |
 | Launch (P1, `scripts/smoke`) | Through a pohunek build of core `368a2d32c` (v0.39.0) in a loopback-only namespace: `--agent muse` launches `muse-bin-<release>` without `--trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, reads `blocked` on the trust dialog, refuses `session input` with `session_input_blocked` and leaves no `trust.json`; with a profile that adds `--trust-workspace --provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
-| Identity and resume (P2, `scripts/smoke`) | With `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with the reference unchanged |
+| Identity and resume (P2, `scripts/smoke`) | With `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with `TBH_MANAGED_HOOKS_PATH` and `POHUNEK_SESSION_ID` in its environment and the reference unchanged |
+| Recovery and profile key (P3, `scripts/smoke`) | With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
 
 ### macOS arm64

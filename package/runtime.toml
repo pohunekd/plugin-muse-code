@@ -44,7 +44,8 @@ text_policy = "unrestricted"
 ready = "screen_idle"
 # Every Muse dialog (trust, sign-in, approval, question) takes Enter as the
 # choice of its preselected entry, so text sent while one shows would answer
-# it unseen; the operator answers through `session attach`.
+# it unseen (measured on the trust dialog; unverified on approval and
+# question); the operator answers through `pohunek attach`.
 refuse_while_blocked = true
 
 # `muse resume <id>` continues a stopped session in its workspace; the hook
