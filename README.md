@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P2)**: launch, program status, session identity, resume and subagents; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
+| Status | **pre-release (P3)**: launch, program status, session identity, resume, subagents and transcript attribution; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -111,6 +111,10 @@ What the package does:
 - Reports `idle`, `working` and `blocked` from the screen (composer, status
   line, trust, sign-in, API-key, approval and question dialogs), from the
   terminal title, and from OSC 7501 records (`app=muse`, the probe is answered).
+- Reads Muse's session logs below `$XDG_DATA_HOME/muse/sessions` (else
+  `~/.local/share/muse/sessions`), `YYYY/MM/DD/<uuid>/session.jsonl`, to attribute
+  a Muse the user runs outside Pohunek. Recovery refuses a session whose
+  `<uuid>/session.jsonl` is gone (`agent_native_reference_missing`).
 - Types the first prompt once the composer is drawn (`ready = "screen_idle"`); the prompt is not an argument, so a prompt such as `logout` never selects a subcommand.
 
 Limits:
@@ -135,7 +139,15 @@ Limits:
 - Background observer threads (`subagent_id` ending in `-reminder`) are never
   Pohunek subagents. A subagent the model spawns is reported with no role,
   because Muse names none on `SubagentStart` (unverified against a real model).
-- A Muse the user starts by hand reports through its process and screen only.
+- A Muse started by hand inside a Pohunek shell session is attributed through
+  its process (`active_agent_base` `muse`), not through its session log;
+  unverified end to end.
+- No profile isolation (owner decision Q4): every profile shares Muse's config
+  home, data root, trust list and stored sign-in, and profiles differ only by
+  `args` and `[env]`. A profile that sets `META_API_KEY` in its `[env]` hands
+  Muse that key; Pohunek never writes it into a descriptor, log or session
+  record. `pohunek session new` cannot take the key from the caller's
+  environment today.
 - `Always allow in this workspace` is in the approval rule from prior art and
   is unverified. No rule names the approval profiles (`Ask me`, `Read-only`,
   `Unrestricted`); only `Auto-review` appears in a capture, in a footer no rule

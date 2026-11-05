@@ -5,9 +5,9 @@
 #
 # The daemon, its workers and Muse run in a network namespace that has only a
 # loopback interface, with their own HOME and XDG roots below --root. No
-# credential, no login and no real model is involved: the working turn uses
-# Muse's own `--provider echo`, and the trust dialog is only looked at, never
-# answered.
+# credential, no login and no real model is involved: the turns use Muse's own
+# `--provider echo` or `scripts/model-stub` on the loopback with a placeholder
+# key, and the trust dialog is only looked at, never answered.
 #
 #   scripts/smoke --root DIR --core-bin DIR --muse-dir DIR
 #
@@ -29,6 +29,10 @@ POLL_SECONDS=0.5
 # Delay Muse's echo provider adds to a turn so `working` is observable.
 ECHO_DELAY_MS=4000
 PROMPT="smoke prompt"
+# Loopback port of scripts/model-stub inside the namespace, and the placeholder
+# key a profile hands to Muse there; neither reaches a real provider.
+STUB_PORT=18083
+PLACEHOLDER_KEY="smoke-placeholder-not-a-key"
 # Initial-input acknowledgement window, and the poll interval and attempts used
 # to catch the short `working` phase of a delayed echo turn.
 INPUT_ACK_MS=8000
@@ -63,7 +67,7 @@ while (($# > 0)); do
 done
 [[ -n "$ROOT" && -n "$CORE_BIN" && -n "$MUSE_DIR" ]] || usage
 
-for tool in unshare ip jq sha256sum cp git readlink sed; do
+for tool in unshare ip jq sha256sum cp git readlink sed socat; do
   command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
 done
 unshare --help 2>&1 | grep -q -- '--map-user' || die "unshare lacks --map-user (util-linux 2.38 or later)"
@@ -85,9 +89,9 @@ touch "$ROOT/$MARKER"
 HOME_DIR="$ROOT/home"
 RT_DIR="$ROOT/rt"
 WS="$ROOT/ws"
-rm -rf "$HOME_DIR" "$RT_DIR" "$WS" "$ROOT/stage" "$ROOT/daemon.log"
+rm -rf "$HOME_DIR" "$RT_DIR" "$WS" "$ROOT/stage" "$ROOT/daemon.log" "$ROOT/stub-state"
 mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/pohunek/agents" "$HOME_DIR/.local/share" \
-  "$HOME_DIR/.local/state" "$WS" "$ROOT/stage"
+  "$HOME_DIR/.local/state" "$WS" "$ROOT/stage" "$ROOT/stub-state"
 chmod 700 "$RT_DIR" 2>/dev/null || { mkdir -p "$RT_DIR" && chmod 700 "$RT_DIR"; }
 chmod 700 "$HOME_DIR/.config/pohunek" "$HOME_DIR/.config/pohunek/agents"
 
@@ -147,12 +151,16 @@ trap teardown EXIT
 
 # --- daemon in a loopback-only namespace ---------------------------------
 uid="$(id -u)" gid="$(id -g)"
-# The inner script is single-quoted on purpose: it expands its own arguments.
+# The inner scripts are quoted on purpose: each expands its own arguments. The
+# model stub listens inside the namespace, so only its loopback reaches it.
 # shellcheck disable=SC2016
 unshare --user --map-root-user --net --mount bash -c '
   ip link set lo up
-  exec unshare --user --map-user="$1" --map-group="$2" "${@:3}"
-' _ "$uid" "$gid" env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" \
+  exec unshare --user --map-user="$1" --map-group="$2" bash -c "
+    STUB_STATE=$3 STUB_HOLD=3 STUB_TOOL_MARKER=STUB_TOOL STUB_ASK_MARKER=STUB_ASK STUB_TOOL_COMMAND=true \
+      socat TCP-LISTEN:$5,bind=127.0.0.1,reuseaddr,fork EXEC:$4 &
+    exec \"\$@\"" _ "${@:6}"
+' _ "$uid" "$gid" "$ROOT/stub-state" "$REPO/scripts/model-stub" "$STUB_PORT" env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" \
   XDG_DATA_HOME="$HOME_DIR/.local/share" XDG_STATE_HOME="$HOME_DIR/.local/state" \
   XDG_RUNTIME_DIR="$RT_DIR" PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color \
   LANG=C.UTF-8 "$CORE_BIN/pohunek" daemon start --dev-subprocess >"$ROOT/daemon.log" 2>&1 &
@@ -286,3 +294,32 @@ bin="$HOME_DIR/.local/bin"
 log "update: no check recorded, release $before_version unchanged"
 
 pk session stop "$echo_id" >/dev/null
+
+# --- 4. recovery needs the session log --------------------------------------
+mv "$echo_log" "$echo_log.away"
+refusal="$(pk session resume "$echo_id" --json || true)"
+mv "$echo_log.away" "$echo_log"
+[[ "$(jq -r '.err.code' <<<"$refusal")" == agent_native_reference_missing ]] ||
+  die "resume without the session log was not refused: $refusal"
+log "recovery: resume is refused while the session log is missing"
+
+# --- 5. a profile key reaches Muse and nothing else ---------------------------
+cat >"$HOME_DIR/.config/pohunek/agents/muse-stub.toml" <<EOF2
+base = "muse"
+package = "dev.runtime.muse"
+digest = "$digest"
+program = "muse"
+args = ["--trust-workspace", "--provider", "meta", "--base-url", "http://127.0.0.1:$STUB_PORT"]
+[env]
+META_API_KEY = "$PLACEHOLDER_KEY"
+EOF2
+chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-stub.toml"
+pk session new --agent muse-stub --cwd "$WS" --name stub --input "stub hello" \
+  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/stub-new.json"
+[[ "$(jq -r '.ok.prompt_delivered' "$ROOT/stub-new.json")" == "true" ]] || die "the stub turn did not start"
+stub_reply() { pk session screen "$(session_id stub)" | grep -q 'stub reply'; }
+wait_for "the stub reply" stub_reply
+pk session stop "$(session_id stub)" >/dev/null
+leaks="$(grep -rlF -- "$PLACEHOLDER_KEY" "$ROOT" | grep -vxF "$HOME_DIR/.config/pohunek/agents/muse-stub.toml" || true)"
+[[ -z "$leaks" ]] || die "the profile key appears in: $leaks"
+log "profile key: the stub turn ran, the key is in no file but the profile"

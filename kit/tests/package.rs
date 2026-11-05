@@ -102,6 +102,14 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
         (home.env(), home.subdir(), home.default_relative()),
         ("XDG_CONFIG_HOME", Some("muse"), ".config/muse")
     );
+    assert_eq!(
+        format!("{:?}", definition.hook_existence()),
+        r#"Some(DirName(DirNameExistence { root_env: Some("XDG_DATA_HOME"), root_home: Some(".local/share"), dir: Some("muse/sessions"), file_name: "session.jsonl", depth: 3 }))"#
+    );
+    assert_eq!(
+        format!("{:?}", definition.transcripts()),
+        r#"Some(Transcripts { parser: MuseSessionV1, dir: "muse/sessions", root: Some(ConfigHome { env: "XDG_DATA_HOME", default: ".local/share", subdir: None }), max_depth: Some(4), head_paths: HeadPaths { id: None, cwd: None } })"#
+    );
     let program_status = definition
         .manifest()
         .program_status()
