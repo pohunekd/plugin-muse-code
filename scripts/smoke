@@ -262,7 +262,6 @@ rm "$muse_settings"
 # `--trust-workspace` trusts the run only; Muse keeps no trust list for it.
 [[ ! -e "$HOME_DIR/.config/muse/trust.json" ]] || die "the launch saved a trust decision"
 log "bare launch: --trust-workspace on create and resume, no trust dialog, composer drawn, update flag set"
-pk session stop "$(session_id bare)" >/dev/null
 
 # --- 2. echo turn: composer ready, input accepted, working then idle ------
 pk session new --agent muse-echo --cwd "$WS" --name echo --input "$PROMPT" \

@@ -1,0 +1,29 @@
+daemon: up, pid <pid>
+setup: real root ready, profile <home>/.config/pohunek/agents/muse_spark13.med.toml
+scenario 1: start (run 1, agent muse_spark13.med, caps 2 steps / 120s)
+scenario 1: fail, root steps 1/2, wall 17s
+scenario 2: start (run 1, agent muse_spark13.med, caps 4 steps / 180s)
+scenario 2: answered the dialog with Enter through pohunek attach
+scenario 2: pass, root steps 2/4, wall 31s
+scenario 3: start (run 1, agent muse_spark13.med, caps 4 steps / 180s)
+scenario 3: answered the dialog with Escape through pohunek attach
+scenario 3: pass, root steps 2/4, wall 48s
+scenario 4: start (run 1, agent muse_spark13.med, caps 3 steps / 180s)
+scenario 4: answered the dialog with Enter through pohunek attach
+scenario 4: pass, root steps 2/3, wall 42s
+scenario 5: start (run 1, agent muse_spark13.med, caps 6 steps / 300s)
+scenario 5: pass, root steps 3/6, wall 44s
+scenario 6: start (run 1, agent muse_spark13.med, caps 2 steps / 120s)
+scenario 6: pass, root steps 1/2, wall 21s
+scenario 7: start (run 1, agent muse_spark13.med, caps 2 steps / 120s)
+scenario 7: evidence (recorded as F8 evidence, not as a pass), root steps 1/2, wall 19s
+update: no check recorded, launcher and install files unchanged
+daemon: stopped pid <pid>
+teardown: no process of this run is left
+daemon: up, pid <pid>
+profile: <home>/.config/pohunek/agents/muse_spark13.med.toml written without a real key
+scenario 1: start (run 2, agent muse_spark13.med, caps 2 steps / 120s)
+scenario 1: pass, root steps 1/2, wall 16s
+update: no check recorded, launcher and install files unchanged
+daemon: stopped pid <pid>
+teardown: no process of this run is left

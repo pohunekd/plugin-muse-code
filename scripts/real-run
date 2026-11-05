@@ -1,0 +1,1210 @@
+#!/usr/bin/env bash
+# Manual verification run of the Muse Code package with a real Meta model
+# (#28). It drives the scenarios of the S6 design through an isolated pohunek
+# daemon root, enforces each scenario's step and wall caps and the run budget,
+# and turns the run into redacted evidence for `compat/real/<platform>/`.
+#
+# Only an operator runs it, by hand, once per release; CI and the capture kit
+# never do. The real run needs the network, so unlike `scripts/smoke` the
+# daemon is not in a loopback-only namespace: isolation is a private HOME, XDG
+# roots and runtime directory below --root and a cleared environment, and the
+# processes of the run are found by that HOME.
+#
+#   scripts/real-run setup --root DIR --core-bin DIR --muse-dir DIR --repo DIR
+#                          (--real | --stub-port PORT)
+#   scripts/real-run daemon --root DIR start|stop
+#   scripts/real-run profile --root DIR
+#   scripts/real-run stub --root DIR start|stop [--tool-marker M]
+#                         [--tool-command C] [--ask-marker A] [--hold S]
+#   scripts/real-run scenario --root DIR --agent NAME N
+#                             [--max-steps K] [--max-wall S]
+#   scripts/real-run spend --root DIR
+#   scripts/real-run update-check --root DIR
+#   scripts/real-run collect --root DIR --out DIR
+#   scripts/real-run scan --secret-env NAME [--exclude FILE] [--secret-only] DIR...
+#   scripts/real-run scan-profile --profile FILE [--exclude FILE] [--secret-only] DIR...
+#
+#   setup         creates --root (a fresh directory), copies the Muse release,
+#                 creates the throwaway repository --repo (one commit of
+#                 README.md), links `package/` under a development id and
+#                 writes the agent profile without a key: `muse_spark13.med`
+#                 for --real, `muse_stub` (placeholder key, loopback stub) for
+#                 --stub-port. It never touches an existing profile.
+#   profile       writes the root's profile again, without a key, after it was
+#                 removed (a scenario rerun); it never replaces a profile
+#   scenario      runs scenario N (1-7) of the design; exit 0 pass, 1 fail,
+#                 3 aborted, 4 recorded as evidence only (scenario 7)
+#   spend         prints the estimated spend of the run from PostLLMCall usage
+#   collect       writes the redacted evidence of the latest run of each
+#                 scenario and of an earlier run whose session another
+#                 scenario continued (6 and 7 continue a scenario-1 run);
+#                 any other earlier run is left out. It fails when a logged
+#                 PreToolUse of any thread breaks the tool rules of its
+#                 scenario
+#   scan          fails when evidence holds the value of $NAME, a home path,
+#                 a host value or an unredacted id; prints file names only.
+#                 --secret-only searches the value alone (a whole run root)
+#   scan-profile  runs `scan` with the profile's META_API_KEY as the needle;
+#                 the value is read inside the scan process and never printed
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+
+# Profile names and the arguments of the design (section 5.1). A profile's args
+# replace the descriptor's, so --trust-workspace is restated.
+REAL_PROFILE="muse_spark13.med"
+STUB_PROFILE="muse_stub"
+REAL_ARGS='["--trust-workspace", "--model", "muse-spark-1.3-contributor", "--reasoning-effort", "medium", "--approval-judge", "off"]'
+STUB_MODEL="stub-model"
+STUB_KEY="real-run-placeholder-not-a-key"
+README_TEXT="synthetic workspace for Muse verification"
+
+# Hook events the counting file registers: steps (PreLLMCall), spend
+# (PostLLMCall), tools (PreToolUse), dialogs (Notification), turn ends (Stop),
+# identity (SessionStart) and subagents.
+COUNT_EVENTS=(SessionStart UserPromptSubmit PreLLMCall PostLLMCall PreToolUse Notification SubagentStart SubagentStop Stop)
+HOOK_TIMEOUT_SECONDS=10
+
+# Sampling and waiting.
+POLL_SECONDS=2
+WAIT_SECONDS=60
+INPUT_ACK_MS=8000
+# Idle samples in a row that count as a settled session.
+SETTLED_SAMPLES=2
+# Time `pohunek attach` gets to draw before a key is sent, and after it.
+ATTACH_SETTLE_SECONDS=2
+# Window in which scenario 3 must read idle after the Escape.
+ABORT_IDLE_SECONDS=60
+# Bound on waiting for the daemon and the run's processes to exit.
+REAP_SECONDS=10
+
+# Budget: the owner's hard cap is 5 USD; the run stops at 4. Prices are USD per
+# million tokens of the Muse Spark list price; no price for the Contributor
+# model is published. Every input token is priced as uncached and reasoning
+# tokens as output, so the estimate is an upper bound.
+BUDGET_STOP_USD=4
+PRICE_INPUT_PER_M=1.25
+PRICE_OUTPUT_PER_M=4.25
+# The run's 10th turn is a global abort.
+MAX_TURNS=9
+
+# Overlay provider named in the isolated daemon's overlays.toml; its CLI must be
+# absent so the daemon serves the local socket only.
+LOCAL_ONLY_OVERLAY="tailscale"
+
+SAFE_PATH_RE='^[A-Za-z0-9._/+-]+$'
+UUID7_RE='[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'
+
+log() { printf 'real-run: %s\n' "$*" >&2; }
+die() {
+  log "FAIL: $*"
+  exit 1
+}
+usage() {
+  sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed '$d;s/^# \{0,1\}//' >&2
+  exit 2
+}
+safe_path() { # <what> <path>
+  [[ "$2" =~ $SAFE_PATH_RE ]] || die "$1 holds a character this script cannot carry (allowed: letters, digits, . _ + - /): $2"
+}
+now_ns() { date +%s%N; }
+
+# --- run state ------------------------------------------------------------------
+ROOT="" CORE_BIN="" REPO="" HOME_DIR="" RT_DIR="" HOOKLOG="" MODE=""
+
+# State is plain `key=value` lines of checked paths, read without `source`.
+load_state() {
+  [[ -n "$ROOT" ]] || usage
+  [[ -f "$ROOT/run.state" ]] || die "$ROOT has no run.state; run setup first"
+  local k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      core_bin) CORE_BIN="$v" ;;
+      repo) REPO="$v" ;;
+      mode) MODE="$v" ;;
+    esac
+  done <"$ROOT/run.state"
+  HOME_DIR="$ROOT/home"
+  RT_DIR="$ROOT/rt"
+  HOOKLOG="$ROOT/hooklog"
+}
+
+# Every command runs with a cleared environment, so nothing of the caller's
+# POHUNEK_* or credential variables reaches the daemon or the CLI.
+isolated() {
+  env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" XDG_DATA_HOME="$HOME_DIR/.local/share" \
+    XDG_STATE_HOME="$HOME_DIR/.local/state" XDG_RUNTIME_DIR="$RT_DIR" \
+    PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 "$@"
+}
+pk() { isolated "$CORE_BIN/pohunek" "$@"; }
+
+run_note() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" >>"$ROOT/run.log"; log "$*"; }
+
+# PIDs of every process whose environment carries this run's HOME. Only the
+# HOME line is matched; no other variable is read.
+run_pids() {
+  local p pid
+  for p in /proc/[0-9]*; do
+    pid="${p#/proc/}"
+    [[ "$pid" == "$$" || "$pid" == "$BASHPID" ]] && continue
+    tr '\0' '\n' 2>/dev/null <"$p/environ" | grep -qxF "HOME=$HOME_DIR" && printf '%s\n' "$pid"
+  done
+  return 0
+}
+
+# --- setup -------------------------------------------------------------------------
+cmd_setup() {
+  local muse_dir="" stub_port="" real=""
+  while (($# > 0)); do
+    case "$1" in
+      --core-bin) CORE_BIN="${2:?}"; shift 2 ;;
+      --muse-dir) muse_dir="${2:?}"; shift 2 ;;
+      --repo) REPO="${2:?}"; shift 2 ;;
+      --real) real=1; shift ;;
+      --stub-port) stub_port="${2:?}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [[ -n "$ROOT" && -n "$CORE_BIN" && -n "$muse_dir" && -n "$REPO" ]] || usage
+  [[ -n "$real" || -n "$stub_port" ]] && [[ -z "$real" || -z "$stub_port" ]] || die "pass exactly one of --real and --stub-port"
+  [[ -z "$stub_port" || "$stub_port" =~ ^[0-9]+$ ]] || die "--stub-port is not a port number"
+  for tool in jq sha256sum git socat tmux perl python3; do
+    command -v "$tool" >/dev/null 2>&1 || die "missing tool: $tool"
+  done
+  for bin in pohunek pohunekd pohunek-sessiond; do
+    [[ -x "$CORE_BIN/$bin" ]] || die "$CORE_BIN/$bin is not executable"
+  done
+  [[ -x "$muse_dir/muse" && -f "$muse_dir/.muse-version" ]] || die "$muse_dir is not a Muse install"
+  # A fresh root only: a profile written earlier may already hold a key.
+  [[ ! -e "$ROOT" ]] || die "$ROOT exists; setup only creates a new root"
+  [[ ! -e "$REPO" ]] || die "$REPO exists; setup only creates a new repository"
+  safe_path --root "$ROOT"
+  safe_path --repo "$REPO"
+  safe_path "the checkout path" "$REPO_DIR"
+  mkdir -p "$ROOT"
+  ROOT="$(cd "$ROOT" && pwd -P)"
+  # A socket path is bounded by sun_path.
+  ((${#ROOT} <= 60)) || die "--root is too long for the daemon socket path (${#ROOT} > 60)"
+  mkdir -p "$REPO"
+  REPO="$(cd "$REPO" && pwd -P)"
+  CORE_BIN="$(cd "$CORE_BIN" && pwd -P)"
+  MODE="${real:+real}"
+  MODE="${MODE:-stub}"
+  printf 'core_bin=%s\nrepo=%s\nmode=%s\nstub_port=%s\n' "$CORE_BIN" "$REPO" "$MODE" "$stub_port" >"$ROOT/run.state"
+  load_state
+  mkdir -p "$HOME_DIR/.local/bin" "$HOME_DIR/.config/pohunek/agents" "$HOME_DIR/.local/share" \
+    "$HOME_DIR/.local/state" "$ROOT/stage" "$ROOT/stub-state" "$ROOT/scenarios" "$HOOKLOG"
+  mkdir -m 700 "$RT_DIR"
+  chmod 700 "$HOME_DIR/.config/pohunek" "$HOME_DIR/.config/pohunek/agents"
+
+  local release f
+  release="$(<"$muse_dir/.muse-version")"
+  [[ "$release" == "$(<"$REPO_DIR/compat/RELEASE")" ]] || die "$muse_dir holds Muse $release, compat/RELEASE locks $(<"$REPO_DIR/compat/RELEASE")"
+  for f in muse .muse-version .muse-release-info.json "muse-bin-$release"; do
+    [[ -e "$muse_dir/$f" ]] || die "$muse_dir/$f is missing"
+    cp --reflink=auto -a "$muse_dir/$f" "$HOME_DIR/.local/bin/"
+  done
+  sha256sum "$HOME_DIR/.local/bin/muse" | cut -d' ' -f1 >"$ROOT/launcher.sha256"
+  find "$HOME_DIR/.local/bin" -mindepth 1 -printf '%P\n' | sort >"$ROOT/install.list"
+
+  printf '%s\n' "$README_TEXT" >"$REPO/README.md"
+  git -C "$REPO" init -q .
+  git -C "$REPO" add README.md
+  git -C "$REPO" -c user.name=real-run -c user.email=real-run@example.invalid commit -q -m "synthetic workspace"
+
+  # Counting hooks: a managed file the hook overlay keeps and extends.
+  local ev entries=()
+  for ev in "${COUNT_EVENTS[@]}"; do
+    entries+=("$(jq -n --arg ev "$ev" --arg cmd "$REPO_DIR/scripts/hook-log $HOOKLOG $ev" \
+      --argjson t "$HOOK_TIMEOUT_SECONDS" '{($ev): [{hooks: [{type: "command", command: $cmd, timeout: $t}]}]}')")
+  done
+  printf '%s\n' "${entries[@]}" | jq -s '{hooks: (add)}' >"$ROOT/count-hooks.json"
+
+  # Without a namespace the daemon would bind its remote listener on the host's
+  # overlay address (NetBird by default), next to the owner's daemon. Naming an
+  # overlay whose CLI this host lacks keeps it local-only.
+  command -v "$LOCAL_ONLY_OVERLAY" >/dev/null 2>&1 && die "$LOCAL_ONLY_OVERLAY is installed; it cannot keep the daemon local-only"
+  (umask 077 && printf 'providers = ["%s"]\n' "$LOCAL_ONLY_OVERLAY" >"$HOME_DIR/.config/pohunek/overlays.toml")
+
+  daemon_start
+  cp "$REPO_DIR/package/runtime.toml" "$REPO_DIR/package/detect.toml" "$ROOT/stage/"
+  sed -i 's/^id = "pohunek\.runtime\.muse"$/id = "dev.runtime.muse"/' "$ROOT/stage/runtime.toml"
+  grep -q '^id = "dev.runtime.muse"$' "$ROOT/stage/runtime.toml" || die "could not stage the development id"
+  pk plugin link "$ROOT/stage" --yes >/dev/null
+  local digest
+  digest="$(pk plugin list --json | jq -r '.ok.packages[0].digest')"
+  pk plugin enable dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
+  pk plugin select dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
+  pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
+  printf '%s\n' "$digest" >"$ROOT/package.digest"
+
+  write_profile "$digest" "$stub_port"
+}
+
+# write_profile <digest> <stub-port>: the agent profile of this root, without
+# a real key. It never replaces a profile: one may already hold the key.
+write_profile() {
+  local digest="$1" stub_port="$2" profile
+  if [[ "$MODE" == real ]]; then
+    profile="$HOME_DIR/.config/pohunek/agents/$REAL_PROFILE.toml"
+  else
+    profile="$HOME_DIR/.config/pohunek/agents/$STUB_PROFILE.toml"
+  fi
+  [[ ! -e "$profile" ]] || die "$profile exists; a profile is never replaced"
+  if [[ "$MODE" == real ]]; then
+    # The key is added by the operator; `[env]` already exists for it.
+    (umask 077 && cat >"$profile" <<EOF
+base = "muse"
+package = "dev.runtime.muse"
+digest = "$digest"
+program = "muse"
+args = $REAL_ARGS
+[env]
+TBH_MANAGED_HOOKS_PATH = "$ROOT/count-hooks.json"
+EOF
+    )
+  else
+    (umask 077 && cat >"$profile" <<EOF
+base = "muse"
+package = "dev.runtime.muse"
+digest = "$digest"
+program = "muse"
+args = ["--trust-workspace", "--model", "$STUB_MODEL", "--reasoning-effort", "medium", "--approval-judge", "off", "--provider", "meta", "--base-url", "http://127.0.0.1:$stub_port"]
+[env]
+META_API_KEY = "$STUB_KEY"
+TBH_MANAGED_HOOKS_PATH = "$ROOT/count-hooks.json"
+EOF
+    )
+  fi
+  chmod 600 "$profile"
+  run_note "profile: $profile written without a real key"
+  printf '%s\n' "$profile"
+}
+
+cmd_profile() {
+  load_state
+  write_profile "$(<"$ROOT/package.digest")" "$(sed -n 's/^stub_port=//p' "$ROOT/run.state")"
+}
+
+# --- daemon --------------------------------------------------------------------------
+daemon_start() {
+  if [[ -f "$ROOT/daemon.pid" ]] && kill -0 "$(<"$ROOT/daemon.pid")" 2>/dev/null; then
+    die "the daemon of this root already runs (pid $(<"$ROOT/daemon.pid"))"
+  fi
+  local log_lines=0
+  [[ -f "$ROOT/daemon.log" ]] && log_lines="$(wc -l <"$ROOT/daemon.log")"
+  # A new session keeps the daemon alive after this script exits.
+  setsid env -i HOME="$HOME_DIR" XDG_CONFIG_HOME="$HOME_DIR/.config" XDG_DATA_HOME="$HOME_DIR/.local/share" \
+    XDG_STATE_HOME="$HOME_DIR/.local/state" XDG_RUNTIME_DIR="$RT_DIR" \
+    PATH="$HOME_DIR/.local/bin:/usr/bin:/bin" TERM=xterm-256color LANG=C.UTF-8 \
+    "$CORE_BIN/pohunek" daemon start --dev-subprocess >>"$ROOT/daemon.log" 2>&1 </dev/null &
+  printf '%s\n' "$!" >"$ROOT/daemon.pid"
+  local i
+  for ((i = 0; i < WAIT_SECONDS; i++)); do
+    pk health >/dev/null 2>&1 && break
+    sleep 1
+  done
+  pk health >/dev/null 2>&1 || die "the isolated daemon did not come up (log: $ROOT/daemon.log)"
+  [[ -S "$RT_DIR/pohunek/daemon.sock" ]] || die "no daemon socket at $RT_DIR/pohunek/daemon.sock"
+  sleep 1
+  tail -n +"$((log_lines + 1))" "$ROOT/daemon.log" | grep -qF 'overlay CLI missing' ||
+    die "the daemon did not report its overlay listener disabled (log: $ROOT/daemon.log)"
+  if tail -n +"$((log_lines + 1))" "$ROOT/daemon.log" | grep -qE 'remote control listener bound|serving control protocol over overlay'; then
+    die "the daemon bound a remote listener"
+  fi
+  run_note "daemon: up, pid $(<"$ROOT/daemon.pid")"
+}
+
+daemon_stop() {
+  local pid i p left
+  if [[ -f "$ROOT/daemon.pid" ]]; then
+    pid="$(<"$ROOT/daemon.pid")"
+    kill "$pid" 2>/dev/null || true
+    for ((i = 0; i < REAP_SECONDS; i++)); do
+      kill -0 "$pid" 2>/dev/null || break
+      sleep 1
+    done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+    rm -f "$ROOT/daemon.pid"
+    run_note "daemon: stopped pid $pid"
+  fi
+  stub_stop
+  # Workers and Muse processes outlive the daemon only by accident; each is
+  # stopped by its exact PID.
+  for p in $(run_pids); do
+    run_note "teardown: stopping leftover pid $p ($(ps -o comm= -p "$p" 2>/dev/null || true))"
+    kill "$p" 2>/dev/null || true
+  done
+  sleep 1
+  for p in $(run_pids); do kill -9 "$p" 2>/dev/null || true; done
+  left="$(run_pids | tr '\n' ' ')"
+  [[ -z "$left" ]] || die "processes of this run are still alive: $left"
+  run_note "teardown: no process of this run is left"
+}
+
+cmd_daemon() {
+  load_state
+  case "${1:-}" in
+    start)
+      daemon_start
+      local digest
+      digest="$(<"$ROOT/package.digest")"
+      pk plugin list --json | jq -e --arg d "$digest" '[.ok.packages[] | select(.digest == $d)] | length == 1' >/dev/null ||
+        die "the linked package digest changed; the profile names $digest"
+      ;;
+    stop) daemon_stop ;;
+    *) usage ;;
+  esac
+}
+
+# --- loopback stub (dry run only) ------------------------------------------------------
+stub_stop() {
+  [[ -f "$ROOT/stub.pid" ]] || return 0
+  kill "$(<"$ROOT/stub.pid")" 2>/dev/null || true
+  rm -f "$ROOT/stub.pid"
+}
+
+cmd_stub() {
+  load_state
+  [[ "$MODE" == stub ]] || die "this root runs a real model; the stub belongs to a --stub-port root"
+  local action="${1:-}" marker="STUB_TOOL" command_line="echo stub > stub-tool.txt" ask="STUB_ASK" hold=3 port
+  shift || true
+  while (($# > 0)); do
+    case "$1" in
+      --tool-marker) marker="${2:?}"; shift 2 ;;
+      --tool-command) command_line="${2:?}"; shift 2 ;;
+      --ask-marker) ask="${2:?}"; shift 2 ;;
+      --hold) hold="${2:?}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  port="$(sed -n 's/^stub_port=//p' "$ROOT/run.state")"
+  case "$action" in
+    start)
+      stub_stop
+      rm -f "$ROOT/stub-state/tool-served" "$ROOT/stub-state/ask-served"
+      STUB_STATE="$ROOT/stub-state" STUB_HOLD="$hold" STUB_TOOL_MARKER="$marker" STUB_TOOL_COMMAND="$command_line" \
+        STUB_ASK_MARKER="$ask" setsid socat "TCP-LISTEN:$port,bind=127.0.0.1,reuseaddr,fork" \
+        "EXEC:$REPO_DIR/scripts/model-stub" </dev/null >>"$ROOT/stub.log" 2>&1 &
+      printf '%s\n' "$!" >"$ROOT/stub.pid"
+      run_note "stub: listening on 127.0.0.1:$port (tool marker '$marker', ask marker '$ask')"
+      ;;
+    stop) stub_stop ;;
+    *) usage ;;
+  esac
+}
+
+# --- hook log --------------------------------------------------------------------------
+# hook_files <from-ns> <event>: logged calls of the event that started at or
+# after the stamp, in start order.
+hook_files() {
+  local from="$1" event="$2" f b s
+  for f in "$HOOKLOG"/*-"$event".json; do
+    [[ -e "$f" ]] || continue
+    b="${f##*/}"
+    s="${b%%-*}"
+    ((s >= from)) && printf '%s\n' "$f"
+  done
+  return 0
+}
+
+# jq prelude: the logged MUSE_* values as an object.
+ENV_JQ='def envmap: (.env_values | map(capture("^(?<key>[A-Z_0-9]+)=(?<value>.*)$")) | from_entries);
+def root: (envmap | .MUSE_THREAD_ID == .MUSE_SESSION_ID);'
+
+# root_count <from-ns> <event>: calls of the root thread since the stamp.
+root_count() {
+  local files
+  mapfile -t files < <(hook_files "$1" "$2")
+  ((${#files[@]} > 0)) || { echo 0; return; }
+  jq -s "$ENV_JQ"' [.[] | select(root)] | length' "${files[@]}"
+}
+
+# Estimated spend in USD over every PostLLMCall of the run (all threads). Muse
+# reports the cache reads twice, as `cache_read_tokens` and `cached_tokens`
+# with the same value, so only one of them is counted.
+spend_usd() {
+  local files
+  mapfile -t files < <(hook_files 0 PostLLMCall)
+  if ((${#files[@]} == 0)); then
+    jq -n '{calls: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cache_read_tokens: 0, usd: 0}'
+    return
+  fi
+  jq -s --argjson pin "$PRICE_INPUT_PER_M" --argjson pout "$PRICE_OUTPUT_PER_M" '
+    [.[].stdin.usage // {}] as $u
+    | {calls: length,
+       input_tokens: ([$u[].input_tokens // 0] | add),
+       output_tokens: ([$u[].output_tokens // 0] | add),
+       reasoning_tokens: ([$u[].reasoning_tokens // 0] | add),
+       cache_read_tokens: ([$u[] | .cache_read_tokens // .cached_tokens // 0] | add)}
+    | .usd = ((.input_tokens * $pin + (.output_tokens + .reasoning_tokens) * $pout) / 1000000)' "${files[@]}"
+}
+
+cmd_spend() {
+  load_state
+  spend_usd
+}
+
+# --- scenarios ---------------------------------------------------------------------------
+# Exact prompts and caps of the design (section 5.2).
+P1='Reply with exactly the word PONG and nothing else. Do not call any tool.'
+P2='Run exactly this shell command once, then reply DONE: echo approval-probe > approval-probe.txt'
+P3='Run exactly this shell command once, then reply DONE: echo abort-probe > abort-probe.txt'
+P4='Use the request_user_input tool once to ask me "Which colour?" with exactly two options, red and blue. After I answer, reply with only the colour I picked.'
+P5='Start exactly one subagent whose only task is to reply with the word CHILD-DONE. Wait for it to finish, then reply with only the word PARENT-DONE. Do not run shell commands.'
+P6='What word did you reply with in your previous answer? Reply with only that word.'
+P7='Reply with exactly the word FRESH.'
+PROBE2='echo approval-probe > approval-probe.txt'
+PROBE3='echo abort-probe > abort-probe.txt'
+ACTIVITY_PREDICATE='[.[].activity] | (index("%s") != null) and (.[-1] == "idle") and (index("%s") < rindex("idle"))'
+
+SCN="" RUN_N=0 SDIR="" SNAME="" SID="" STEPS_CAP=0 WALL_CAP=0 ALLOWED_ROOT_TOOLS="" T0=0 FROM_NS=0
+
+scenario_caps() { # <n>: steps wall allowed-root-tools
+  case "$1" in
+    1) echo "2 120 -" ;;
+    2) echo "4 180 bash" ;;
+    3) echo "4 180 bash" ;;
+    4) echo "3 180 request_user_input" ;;
+    5) echo "6 300 subagent_spawn,subagent_wait,subagent_status,subagent_read_result" ;;
+    6) echo "2 120 -" ;;
+    7) echo "2 120 -" ;;
+    *) die "unknown scenario: $1" ;;
+  esac
+}
+
+scenario_probe() { # <n>: the one shell command the scenario allows
+  case "$1" in
+    2) printf '%s\n' "$PROBE2" ;;
+    3) printf '%s\n' "$PROBE3" ;;
+    *) echo "" ;;
+  esac
+}
+
+# The wait loops decide on the sample they just recorded, so every state they
+# act on is also in samples.jsonl.
+LAST_SAMPLE=""
+sample() {
+  LAST_SAMPLE="$(pk session list --json 2>/dev/null |
+    jq -c --arg n "$SNAME" '.ok[] | select(.name == $n) | {activity, state_source, native_session_id, subagents}' 2>/dev/null || true)"
+  [[ -z "$LAST_SAMPLE" ]] || printf '%s\n' "$LAST_SAMPLE" >>"$SDIR/samples.jsonl"
+}
+field() { # <jq path>
+  pk session list --json | jq -r --arg n "$SNAME" ".ok[] | select(.name == \$n) | $1 // empty"
+}
+screen() { pk session screen "$SID"; }
+snap() { screen >"$SDIR/screen-$1.txt" 2>&1 || true; }
+
+abort() {
+  run_note "scenario $SCN: ABORT: $*"
+  pk session stop "$SID" >/dev/null 2>&1 || true
+  snap aborted
+  finish aborted "$*"
+  exit 3
+}
+
+# Counts one model turn against the run's limit before it is sent.
+take_turn() {
+  local n=0
+  [[ -f "$ROOT/turns" ]] && n="$(<"$ROOT/turns")"
+  ((n + 1 <= MAX_TURNS)) || die "the next input would be turn $((n + 1)); the run allows $MAX_TURNS"
+  printf '%s\n' "$((n + 1))" >"$ROOT/turns"
+}
+
+# Verdict on one PreToolUse call: "ok" or the reason to abort. An absolute
+# path is any part of a string that starts with `/` after a separator.
+TOOL_JQ="$(
+  cat <<'EOF'
+(.stdin.tool_name // "") as $t
+| (.stdin.tool_input // {}) as $in
+| ([$in | .. | strings | scan("(?:^|[\\s\"'=:])(/[^\\s\"';|&)]+)") | .[0]]
+   | map(select(. != "/dev/null" and (. == $repo or startswith($repo + "/")) | not))) as $outside
+| if ($outside | length) > 0 then "path outside the repository in \($t)"
+  elif (root | not) then
+    (if $t == "submit_reminder_decision" then "ok" else "tool \($t) on a non-root thread" end)
+  elif ($allowed | split(",") | index($t)) == null then "unexpected tool \($t)"
+  elif $t == "bash" and (($in.command // "" | gsub("^\\s+|\\s+$"; "")) != $probe) then "bash command differs from the probe"
+  elif $t == "bash" and (($in.workdir // $repo) != $repo) then "bash workdir outside the repository"
+  else "ok" end
+EOF
+)"
+
+# check_tools: every new PreToolUse is one the scenario expects, inside the
+# repository; an unexpected one aborts the scenario. Tools that run no
+# PreToolUse hook (request_user_input) are outside this check.
+check_tools() {
+  local f seen="$SDIR/.checked-tools" verdict
+  touch "$seen"
+  while IFS= read -r f; do
+    grep -qxF "$f" "$seen" && continue
+    printf '%s\n' "$f" >>"$seen"
+    verdict="$(jq -r "$ENV_JQ $TOOL_JQ" --arg repo "$REPO" --arg allowed "$ALLOWED_ROOT_TOOLS" \
+      --arg probe "${PROBE:-}" "$f")"
+    [[ "$verdict" == ok ]] || abort "$verdict (${f##*/})"
+  done < <(hook_files "$FROM_NS" PreToolUse)
+}
+
+# One poll: sample, then enforce the caps, the tools and the budget.
+tick() {
+  sample
+  check_tools
+  local steps usd
+  steps="$(root_count "$FROM_NS" PreLLMCall)"
+  ((steps <= STEPS_CAP)) || abort "root steps $steps exceed the cap $STEPS_CAP"
+  (($(date +%s) - T0 <= WALL_CAP)) || abort "wall time exceeds the cap ${WALL_CAP}s"
+  usd="$(spend_usd | jq -r '.usd')"
+  jq -e -n --argjson u "$usd" --argjson cap "$BUDGET_STOP_USD" '$u < $cap' >/dev/null ||
+    abort "estimated spend $usd USD reached the stop line of $BUDGET_STOP_USD USD"
+  sleep "$POLL_SECONDS"
+}
+
+activity() {
+  [[ -n "$LAST_SAMPLE" ]] || { echo none; return; }
+  jq -r '.activity // "none"' <<<"$LAST_SAMPLE"
+}
+
+# wait_turn_end <from-ns>: until the root thread logged Stop after the stamp
+# and the session reads idle twice in a row.
+wait_turn_end() {
+  local from="$1" idle=0
+  while :; do
+    tick
+    if (($(root_count "$from" Stop) > 0)) && [[ "$(activity)" == idle ]]; then
+      idle=$((idle + 1))
+      ((idle >= SETTLED_SAMPLES)) && return 0
+    else
+      idle=0
+    fi
+  done
+}
+
+# wait_dialog <text>: until the session reads blocked with the text on screen.
+wait_dialog() {
+  while :; do
+    tick
+    [[ "$(activity)" == blocked ]] && screen | grep -qF -- "$1" && return 0
+  done
+}
+
+# wait_idle_within <seconds>: until the session reads idle twice in a row.
+wait_idle_within() {
+  local limit=$(($(date +%s) + $1)) idle=0
+  while (($(date +%s) <= limit)); do
+    tick
+    if [[ "$(activity)" == idle ]]; then
+      idle=$((idle + 1))
+      ((idle >= SETTLED_SAMPLES)) && return 0
+    else
+      idle=0
+    fi
+  done
+  return 1
+}
+
+# answer_dialog <tmux key>: the operator path, `pohunek attach` in a private
+# tmux server started with the isolated environment.
+answer_dialog() {
+  local sock="$ROOT/tmux.sock"
+  isolated tmux -S "$sock" -f /dev/null new-session -d -s att -x 200 -y 50 "$CORE_BIN/pohunek attach $SID"
+  sleep "$ATTACH_SETTLE_SECONDS"
+  isolated tmux -S "$sock" send-keys -t att "$1"
+  sleep "$ATTACH_SETTLE_SECONDS"
+  isolated tmux -S "$sock" send-keys -t att C-]
+  sleep 1
+  isolated tmux -S "$sock" kill-server 2>/dev/null || true
+  run_note "scenario $SCN: answered the dialog with $1 through pohunek attach"
+}
+
+send_input() { # <text>
+  take_turn
+  pk session input "$SID" "$1" >/dev/null || abort "session input was refused"
+}
+
+new_session() { # <prompt>
+  take_turn
+  pk session new --agent "$AGENT" --cwd "$REPO" --name "$SNAME" --input "$1" \
+    --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$SDIR/session-new.json" 2>&1 ||
+    die "session new failed (see $SDIR/session-new.json)"
+  [[ "$(jq -r '.ok.prompt_delivered' "$SDIR/session-new.json")" == true ]] || die "the initial input did not start a turn"
+  SID="$(jq -r '.ok.id' "$SDIR/session-new.json")"
+  printf '%s\n' "$SID" >"$SDIR/session.id"
+}
+
+record_ps() { # <label>
+  local pid
+  pid="$(field .pid)"
+  [[ -n "$pid" ]] || return 0
+  printf '%s: %s\n' "$1" "$(ps -o args= -p "$pid")" >>"$SDIR/ps.txt"
+}
+
+# Newest Muse session directory below the data root, by name (UUIDv7 sorts by
+# time).
+newest_session_dir() {
+  find "$HOME_DIR/.local/share/muse/sessions" -mindepth 4 -maxdepth 4 -type d -printf '%f\n' 2>/dev/null |
+    grep -E "^$UUID7_RE\$" | sort | tail -n 1
+}
+
+activity_ok() { # <state>
+  # shellcheck disable=SC2059
+  [[ "$(jq -s "$(printf "$ACTIVITY_PREDICATE" "$1" "$1")" "$SDIR/samples.jsonl")" == true ]]
+}
+
+# Text of the screen after the last line that holds the anchor.
+screen_after() { # <file> <anchor>
+  awk -v a="$2" 'index($0, a) { buf = ""; found = 1; next } found { buf = buf $0 "\n" } END { printf "%s", buf }' "$1"
+}
+
+CHECKS=()
+check() { # <name> <command...>
+  local name="$1"
+  shift
+  if "$@"; then CHECKS+=("$(jq -cn --arg n "$name" '{check: $n, ok: true}')"); else CHECKS+=("$(jq -cn --arg n "$name" '{check: $n, ok: false}')"); fi
+}
+
+finish() { # <outcome> [note]
+  local outcome="$1" note="${2:-}" end_ns steps
+  end_ns="$(now_ns)"
+  steps="$(root_count "$FROM_NS" PreLLMCall)"
+  printf '%s\n' "$end_ns" >"$SDIR/end.ns"
+  jq -n --arg scenario "$SCN" --arg outcome "$outcome" --arg note "$note" --argjson steps "$steps" \
+    --argjson cap "$STEPS_CAP" --argjson wall "$(($(date +%s) - T0))" --argjson wall_cap "$WALL_CAP" \
+    --argjson spend "$(spend_usd)" --argjson checks "$(printf '%s\n' "${CHECKS[@]}" | jq -s 'map(select(. != null))')" \
+    '{scenario: $scenario, outcome: $outcome, note: $note, root_steps: $steps, step_cap: $cap,
+      wall_seconds: $wall, wall_cap: $wall_cap, run_spend: $spend, checks: $checks}' >"$SDIR/result.json"
+  run_note "scenario $SCN: $outcome${note:+ ($note)}, root steps $steps/$STEPS_CAP, wall $(($(date +%s) - T0))s"
+}
+
+verdict() { # pass when every check passed
+  local c
+  for c in "${CHECKS[@]}"; do
+    [[ "$(jq -r .ok <<<"$c")" == true ]] || return 1
+  done
+  return 0
+}
+
+# Hook payload checks over the scenario's window.
+hook_has() { # <event> <jq filter over one call>
+  local files
+  mapfile -t files < <(hook_files "$FROM_NS" "$1")
+  ((${#files[@]} > 0)) || return 1
+  jq -e -s "$ENV_JQ"' any(.[]; '"$2"')' "${files[@]}" >/dev/null
+}
+no_root_hook() { (($(root_count "$FROM_NS" "$1") == 0)); }
+
+cmd_scenario() {
+  load_state
+  AGENT=""
+  local max_steps="" max_wall=""
+  while (($# > 0)); do
+    case "$1" in
+      --agent) AGENT="${2:?}"; shift 2 ;;
+      --max-steps) max_steps="${2:?}"; shift 2 ;;
+      --max-wall) max_wall="${2:?}"; shift 2 ;;
+      [1-7]) SCN="$1"; shift ;;
+      *) usage ;;
+    esac
+  done
+  [[ -n "$AGENT" && -n "$SCN" ]] || usage
+  read -r STEPS_CAP WALL_CAP ALLOWED_ROOT_TOOLS <<<"$(scenario_caps "$SCN")"
+  # Overrides may only tighten a cap (the dry run proves the aborts).
+  [[ -z "$max_steps" ]] || { ((max_steps <= STEPS_CAP)) || die "--max-steps may only lower the cap"; STEPS_CAP="$max_steps"; }
+  [[ -z "$max_wall" ]] || { ((max_wall <= WALL_CAP)) || die "--max-wall may only lower the cap"; WALL_CAP="$max_wall"; }
+  pk health >/dev/null 2>&1 || die "the daemon of this root is not running"
+  local usd
+  usd="$(spend_usd | jq -r '.usd')"
+  jq -e -n --argjson u "$usd" --argjson cap "$BUDGET_STOP_USD" '$u < $cap' >/dev/null ||
+    die "estimated spend $usd USD is at the stop line; no scenario starts"
+
+  RUN_N=1
+  while [[ -e "$ROOT/scenarios/$SCN-$RUN_N" ]]; do RUN_N=$((RUN_N + 1)); done
+  SDIR="$ROOT/scenarios/$SCN-$RUN_N"
+  mkdir -p "$SDIR"
+  : >"$SDIR/samples.jsonl"
+  T0="$(date +%s)"
+  FROM_NS="$(now_ns)"
+  printf '%s\n' "$FROM_NS" >"$SDIR/start.ns"
+  printf '%s\n' "$AGENT" >"$SDIR/agent"
+  run_note "scenario $SCN: start (run $RUN_N, agent $AGENT, caps $STEPS_CAP steps / ${WALL_CAP}s)"
+  PROBE=""
+  "scenario_$SCN"
+}
+
+scenario_1() {
+  SNAME="s1r$RUN_N"
+  new_session "$P1"
+  printf '%s\n' "$SNAME" >"$ROOT/s1.name"
+  wait_turn_end "$FROM_NS"
+  snap "done"
+  record_ps launch
+  local native newest
+  native="$(field .native_session_id)"
+  newest="$(newest_session_dir)"
+  check working-then-idle activity_ok working
+  check screen-PONG grep -qE '◆[[:space:]]+PONG' "$SDIR/screen-done.txt"
+  check native-is-uuid grep -qxE "$UUID7_RE" <<<"$native"
+  check native-is-newest-session-dir test "$native" == "$newest"
+  check sessionstart-startup hook_has SessionStart '.stdin.source == "startup"'
+  # Observer threads call submit_reminder_decision; only the root counts.
+  check no-root-pretooluse no_root_hook PreToolUse
+  # The session stays for scenarios 6 and 7.
+  conclude
+}
+
+# Scenarios 2 and 3: one approval dialog, answered with <key>.
+approval_scenario() { # <probe> <key>
+  PROBE="$1"
+  new_session "$2"
+  wait_dialog 'Would you like to run the following command?'
+  snap blocked
+  check dialog-allow-once grep -qF 'Allow this stage once' "$SDIR/screen-blocked.txt"
+  check one-root-pretooluse test "$(root_count "$FROM_NS" PreToolUse)" -eq 1
+  local answered_ns
+  answered_ns="$(now_ns)"
+  answer_dialog "$3"
+  if [[ "$3" == Enter ]]; then
+    wait_turn_end "$answered_ns"
+  else
+    wait_idle_within "$ABORT_IDLE_SECONDS" || { CHECKS+=('{"check":"idle-within-60s-of-escape","ok":false}'); }
+  fi
+  snap "done"
+}
+
+scenario_2() {
+  SNAME="s2r$RUN_N"
+  approval_scenario "$(scenario_probe 2)" "$P2" Enter
+  check blocked-then-idle activity_ok blocked
+  check probe-file-written grep -qxF approval-probe "$REPO/approval-probe.txt"
+  pk session stop "$SID" >/dev/null
+  conclude
+}
+
+scenario_3() {
+  SNAME="s3r$RUN_N"
+  approval_scenario "$(scenario_probe 3)" "$P3" Escape
+  check blocked-then-idle activity_ok blocked
+  check probe-file-absent test ! -e "$REPO/abort-probe.txt"
+  pk session stop "$SID" >/dev/null
+  conclude
+}
+
+scenario_4() {
+  SNAME="s4r$RUN_N"
+  new_session "$P4"
+  wait_dialog 'Enter to select'
+  snap blocked
+  # request_user_input runs no PreToolUse hook; Muse reports the picker with
+  # a Notification.
+  check question-notification hook_has Notification 'root'
+  local answered_ns
+  answered_ns="$(now_ns)"
+  answer_dialog Enter
+  wait_turn_end "$answered_ns"
+  snap "done"
+  check blocked-then-idle activity_ok blocked
+  check screen-red grep -qE '◆[[:space:]]+red' "$SDIR/screen-done.txt"
+  pk session stop "$SID" >/dev/null
+  conclude
+}
+
+scenario_5() {
+  SNAME="s5r$RUN_N"
+  new_session "$P5"
+  wait_turn_end "$FROM_NS"
+  snap "done"
+  local native
+  native="$(field .native_session_id)"
+  pk session list --json | jq -c --arg n "$SNAME" '.ok[] | select(.name == $n) | .subagents' >"$SDIR/subagents.json"
+  # shellcheck disable=SC2016
+  check subagent-completed jq -e --arg p "$native" 'any(.[]?; .lifecycle == "completed" and .provider == "muse" and .parent_id == $p)' "$SDIR/subagents.json" >/dev/null
+  check model-subagent-start hook_has SubagentStart '(.stdin.subagent_id // "" | endswith("-reminder") | not)'
+  check model-subagent-stop hook_has SubagentStop '(.stdin.subagent_id // "" | endswith("-reminder") | not)'
+  check screen-PARENT-DONE grep -qE '◆[[:space:]]+PARENT-DONE' "$SDIR/screen-done.txt"
+  pk session stop "$SID" >/dev/null
+  conclude
+}
+
+# Scenarios 6 and 7 continue the session of the last scenario-1 run.
+s1_session() {
+  [[ -f "$ROOT/s1.name" ]] || die "no scenario-1 session; run scenario 1 first"
+  SNAME="$(<"$ROOT/s1.name")"
+  SID="$(field .id)"
+  [[ -n "$SID" ]] || die "no session named $SNAME"
+  printf '%s\n' "$SID" >"$SDIR/session.id"
+}
+
+scenario_6() {
+  s1_session
+  local before
+  before="$(field .native_session_id)"
+  [[ -n "$before" ]] || die "session s1 has no native reference"
+  pk session stop "$SID" >/dev/null
+  pk session resume "$SID" >/dev/null
+  local i
+  for ((i = 0; i < WAIT_SECONDS / POLL_SECONDS; i++)); do
+    tick
+    [[ "$(activity)" == idle ]] && break
+  done
+  snap resumed
+  record_ps resume
+  check resume-args grep -qE " resume $before\$" <(sed -n 's/^resume: //p' "$SDIR/ps.txt")
+  local asked_ns
+  asked_ns="$(now_ns)"
+  send_input "$P6"
+  wait_turn_end "$asked_ns"
+  snap "done"
+  screen_after "$SDIR/screen-done.txt" 'previous answer' >"$SDIR/screen-after-question.txt"
+  check screen-PONG-after-question grep -qE '◆[[:space:]]+PONG' "$SDIR/screen-after-question.txt"
+  check sessionstart-resume hook_has SessionStart '.stdin.source == "resume"'
+  check native-unchanged test "$(field .native_session_id)" == "$before"
+  conclude
+}
+
+scenario_7() {
+  s1_session
+  local before clear_ns
+  before="$(field .native_session_id)"
+  clear_ns="$(now_ns)"
+  take_turn
+  pk session input "$SID" "/clear" >/dev/null || abort "session input was refused"
+  local i
+  for ((i = 0; i < WAIT_SECONDS / POLL_SECONDS; i++)); do
+    tick
+    screen | grep -qF 'started a fresh session' && break
+  done
+  snap cleared
+  local asked_ns
+  asked_ns="$(now_ns)"
+  send_input "$P7"
+  wait_turn_end "$asked_ns"
+  snap "done"
+  local files new_id
+  mapfile -t files < <(hook_files "$clear_ns" SessionStart)
+  new_id=""
+  ((${#files[@]} == 0)) || new_id="$(jq -r -s '[.[] | select(.stdin.source == "clear")][0].stdin.session_id // empty' "${files[@]}")"
+  check sessionstart-clear test -n "$new_id"
+  check clear-id-is-new test "$new_id" != "$before"
+  check clear-hook-has-no-pohunek-env hook_has SessionStart '.stdin.source == "clear" and ((.env_names | map(select(startswith("POHUNEK_"))) | length) == 0)'
+  check new-session-dir test -n "$(find "$HOME_DIR/.local/share/muse/sessions" -mindepth 4 -maxdepth 4 -type d -name "${new_id:-none}" -print -quit)"
+  check screen-FRESH grep -qE '◆[[:space:]]+FRESH' "$SDIR/screen-done.txt"
+  local after
+  after="$(field .native_session_id)"
+  printf '{"before":"%s","after":"%s","clear_session":"%s"}\n' "$before" "$after" "$new_id" >"$SDIR/identity.json"
+  # Today the reference stays on the session before /clear (F8, core issue
+  # C-B); once C-B lands it equals the new session.
+  if [[ "$after" == "$before" ]]; then
+    CHECKS+=('{"check":"reference-stays-before-clear (F8 reproduced)","ok":true}')
+  else
+    CHECKS+=("$(jq -cn --arg ok "$([[ "$after" == "$new_id" ]] && echo true || echo false)" '{check: "reference-moved-to-clear-session", ok: ($ok == "true")}')")
+  fi
+  pk session stop "$SID" >/dev/null
+  if verdict; then
+    finish evidence "recorded as F8 evidence, not as a pass"
+    exit 4
+  fi
+  finish fail
+  exit 1
+}
+
+conclude() {
+  if verdict; then
+    finish pass
+    exit 0
+  fi
+  finish fail
+  exit 1
+}
+
+cmd_update_check() {
+  load_state
+  local bin="$HOME_DIR/.local/bin" ok=1
+  [[ ! -e "$bin/.muse-update-checked-at" ]] || { log "the launcher recorded an update check"; ok=0; }
+  [[ "$(sha256sum "$bin/muse" | cut -d' ' -f1)" == "$(<"$ROOT/launcher.sha256")" ]] || { log "the launcher changed"; ok=0; }
+  [[ "$(find "$bin" -mindepth 1 -printf '%P\n' | sort)" == "$(<"$ROOT/install.list")" ]] || { log "files changed in the install directory"; ok=0; }
+  ((ok == 1)) || die "the launcher reached the update path"
+  run_note "update: no check recorded, launcher and install files unchanged"
+}
+
+# --- evidence ---------------------------------------------------------------------------
+# Strings over 80 characters become a length marker; host fields are dropped.
+LONG_STRING_FILTER='walk(if type == "string" and length > 80 then "<" + (length | tostring) + " chars>" else . end)'
+HOST_FIELD_FILTER='walk(if type == "object" then with_entries(select(.key | test("free_bytes|^pid$|_pid$") | not)) else . end)'
+# Values that identify a provider response or a cache entry.
+OPAQUE_FIELD_FILTER='walk(if type == "object" then with_entries(if (.key | test("^(response_id|meta\\.prompt_cache_key)$")) and (.value | type) == "string" then .value = "<redacted>" else . end) else . end)'
+
+# redact_tree <dir>: path, id and handshake substitutions over every file of
+# the tree, with ids numbered by first appearance across the whole tree.
+redact_tree() {
+  local dir="$1"
+  # shellcheck disable=SC2016
+  find "$dir" -type f -print0 | sort -z | xargs -0 perl -e '
+    my ($repo, $root, $isohome, $plugin, $home) = splice(@ARGV, 0, 5);
+    my (%m, %n);
+    sub num { my ($kind, $v) = @_; $m{$kind}{$v} //= ++$n{$kind}; "<$kind-$m{$kind}{$v}>" }
+    for my $file (@ARGV) {
+      open(my $fh, "<", $file) or die "$file: $!";
+      local $/; my $t = <$fh>; close $fh;
+      # Longest first, so a path that extends another keeps its own marker.
+      for my $p (sort { length($b->[0]) <=> length($a->[0]) }
+          ([$isohome, "<home>"], [$root, "<root>"], [$repo, "<repo>"], [$plugin, "<plugin>"], [$home, "<home>"])) {
+        my ($needle, $ph) = @$p;
+        next unless length $needle;
+        # A long path may wrap across screen rows with indentation.
+        my $re = join(q{(?:\n[ ]*)?}, map { quotemeta } split //, $needle);
+        $t =~ s{$re}{$ph}g;
+        # The footer shortens a long cwd to `/…/<last parts>`.
+        my @parts = split m{/}, $needle;
+        for my $i (2 .. $#parts) {
+          my $suffix = join("/", @parts[$i .. $#parts]);
+          $t =~ s{/?…/\Q$suffix\E(?![A-Za-z0-9._-])}{$ph}g;
+        }
+      }
+      $t =~ s{\b00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]\b}{<traceparent>}g;
+      $t =~ s{\b([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\b}{num("muse-session", $1)}ge;
+      $t =~ s{\b(s-[0-9A-HJKMNP-TV-Z]{26})\b}{num("pohunek-session", $1)}ge;
+      $t =~ s{\b(worker-[0-9a-f]{32})\b}{num("worker", $1)}ge;
+      $t =~ s{(POHUNEK_[A-Z0-9_]*=)[^"\s]*}{$1<redacted>}g;
+      # Provider response, reasoning, message and tool-call ids.
+      $t =~ s{\b(?:resp|rs|msg|fc|call)_[A-Za-z0-9]{16,}}{<provider-id>}g;
+      open(my $out, ">", $file) or die "$file: $!";
+      print $out $t; close $out;
+    }' "$REPO" "$ROOT" "$HOME_DIR" "$REPO_DIR" "$HOME"
+}
+
+# latest_run_of <scenario>: the directory name of its highest run.
+latest_run_of() {
+  find "$ROOT/scenarios" -mindepth 1 -maxdepth 1 -name "$1-*" -printf '%f\n' | sort -t- -k2,2n | tail -n 1
+}
+
+# kept_run <scenario dir>: true for the latest run of its scenario and for a run
+# whose session another scenario continued (its session.id is the same).
+kept_run() {
+  local d="$1" name="${1##*/}" other
+  [[ "$(latest_run_of "${name%%-*}")" == "$name" ]] && return 0
+  [[ -s "$d/session.id" ]] || return 1
+  for other in "$ROOT"/scenarios/*/session.id; do
+    other="${other%/session.id}"
+    [[ "${other##*/}" != "${name%%-*}"-* ]] || continue
+    cmp -s "$d/session.id" "$other/session.id" && return 0
+  done
+  return 1
+}
+
+# check_window_tools <scenario> <from-ns> <to-ns>: the check_tools verdict over
+# every thread's PreToolUse in the window, including calls logged after the
+# scenario stopped polling (observer threads start after the root's Stop).
+check_window_tools() {
+  local scn="$1" from="$2" to="$3" allowed f s verdict
+  read -r _ _ allowed <<<"$(scenario_caps "$scn")"
+  for f in "$HOOKLOG"/*-PreToolUse.json; do
+    [[ -e "$f" ]] || continue
+    s="${f##*/}"
+    s="${s%%-*}"
+    ((s >= from && s < to)) || continue
+    verdict="$(jq -r "$ENV_JQ $TOOL_JQ" --arg repo "$REPO" --arg allowed "$allowed" \
+      --arg probe "$(scenario_probe "$scn")" "$f")"
+    [[ "$verdict" == ok ]] || die "scenario $scn: $verdict (${f##*/}); no evidence is written"
+  done
+}
+
+cmd_collect() {
+  load_state
+  local out="" d n f event s stage
+  while (($# > 0)); do
+    case "$1" in
+      --out) out="${2:?}"; shift 2 ;;
+      *) usage ;;
+    esac
+  done
+  [[ -n "$out" ]] || usage
+  [[ ! -e "$out" ]] || die "$out exists; collect writes a new directory"
+  stage="$ROOT/collect-stage"
+  rm -rf "$stage"
+  mkdir -p "$stage"
+  local dirs=() starts=()
+  for d in "$ROOT"/scenarios/*/; do
+    d="${d%/}"
+    [[ -f "$d/start.ns" ]] || continue
+    dirs+=("$d")
+  done
+  ((${#dirs[@]} > 0)) || die "no scenario ran in $ROOT"
+  # Each scenario's window runs to the next scenario's start, so late observer
+  # calls stay with the turn that caused them.
+  mapfile -t dirs < <(for d in "${dirs[@]}"; do printf '%s %s\n' "$(<"$d/start.ns")" "$d"; done | sort -n | cut -d' ' -f2-)
+  for d in "${dirs[@]}"; do starts+=("$(<"$d/start.ns")"); done
+  local i to name
+  for ((i = 0; i < ${#dirs[@]}; i++)); do
+    d="${dirs[i]}"
+    name="${d##*/}"
+    to=9223372036854775807
+    ((i + 1 < ${#dirs[@]})) && to="${starts[i + 1]}"
+    # Calls before the first scenario fall under the first one's rules.
+    check_window_tools "${name%%-*}" "$((i == 0 ? 0 : starts[i]))" "$to"
+    # A later run of the same scenario replaces this one unless another
+    # scenario continued its session; its window still bounds the scenario
+    # before it.
+    kept_run "$d" || continue
+    mkdir -p "$stage/$name/hooks"
+    for f in "$d"/samples.jsonl "$d"/result.json "$d"/ps.txt "$d"/subagents.json "$d"/identity.json "$d"/screen-*.txt; do
+      [[ -e "$f" ]] && cp "$f" "$stage/$name/"
+    done
+    n=0
+    for f in "$HOOKLOG"/*.json; do
+      [[ -e "$f" ]] || continue
+      s="${f##*/}"
+      s="${s%%-*}"
+      ((s >= starts[i] && s < to)) || continue
+      event="${f##*/}"
+      event="${event#*-}"
+      event="${event%.json}"
+      n=$((n + 1))
+      jq -c "$OPAQUE_FIELD_FILTER | $HOST_FIELD_FILTER | $LONG_STRING_FILTER" "$f" >"$(printf '%s/%03d-%s.json' "$stage/$name/hooks" "$n" "$event")"
+    done
+  done
+  sed -E -e 's/^[0-9TZ:-]* //' -e 's/pid [0-9]+/pid <pid>/g' "$ROOT/run.log" >"$stage/run.log"
+  spend_usd >"$stage/spend.json"
+  redact_tree "$stage"
+  mkdir -p "$(dirname "$out")"
+  mv "$stage" "$out"
+  log "evidence in $out"
+}
+
+# --- scan -------------------------------------------------------------------------------------
+host_needles() {
+  {
+    printf '%s\n' "$HOME" "$(id -un)" "$(hostname)" "$(hostname -s 2>/dev/null || true)"
+    getent passwd "$(id -un)" | cut -d: -f5 | tr ',' '\n'
+    printf '%s\n' "$REPO_DIR"
+    # Path components that identify the host: those with a digit or underscore.
+    local part
+    for part in ${HOME//\// } ${REPO_DIR//\// }; do
+      [[ ${#part} -ge 4 && "$part" =~ [0-9_] ]] && printf '%s\n' "$part"
+    done
+  } | awk 'length($0) >= 3' | sort -u
+}
+
+# scan_dirs <secret-value> <exclude> <secret-only> <dir...>: prints
+# `<file>: <rule>` per hit, never a matched value; returns 1 on any hit.
+scan_dirs() {
+  local secret="$1" exclude="$2" secret_only="$3" bad=0 f lower squashed needle n
+  shift 3
+  if [[ -n "$secret_only" ]]; then
+    # A whole root holds binaries; only the secret is searched there.
+    while IFS= read -r f; do
+      [[ -n "$exclude" && "$(realpath -- "$f")" == "$(realpath -- "$exclude")" ]] && continue
+      printf '%s: the secret value\n' "$f"
+      bad=1
+    done < <(grep -rlF -f <(printf '%s\n' "$secret") -- "$@" || true)
+    return $((bad))
+  fi
+  local needles=() derived=()
+  mapfile -t needles < <(host_needles)
+  # Truncated renderings next to an ellipsis.
+  for needle in "${needles[@]}"; do
+    ((${#needle} >= 5)) || continue
+    for ((n = 3; n < ${#needle}; n++)); do
+      derived+=("${needle:0:n}…" "…${needle:${#needle}-n}")
+    done
+  done
+  needles+=("${derived[@]}")
+  while IFS= read -r -d '' f; do
+    [[ -n "$exclude" && "$(realpath -- "$f")" == "$(realpath -- "$exclude")" ]] && continue
+    # The secret is passed on a pipe, never as an argument.
+    if grep -qF -f <(printf '%s\n' "$secret") -- "$f"; then
+      printf '%s: the secret value\n' "$f"
+      bad=1
+    fi
+    if grep -qiP '(authorization|bearer|api[_-]?key)\s*["'"'"']?\s*[:=]' -- "$f"; then
+      printf '%s: credential-shaped assignment\n' "$f"
+      bad=1
+    fi
+    lower="$(tr '[:upper:]' '[:lower:]' <"$f")"
+    squashed="$(printf '%s' "$lower" | sed -e 's/[│┃║─ \t\r]//g' | tr -d '\n')"
+    for needle in "${needles[@]}"; do
+      local ln="${needle,,}"
+      if [[ "$lower" == *"$ln"* || "$squashed" == *"${ln//[[:space:]]/}"* ]]; then
+        printf '%s: host value (%s characters)\n' "$f" "${#needle}"
+        bad=1
+      fi
+    done
+    if [[ "$squashed" =~ /(home|users|root)/[a-z0-9._-]+ ]]; then
+      printf '%s: home path\n' "$f"
+      bad=1
+    fi
+    if grep -qE "$UUID7_RE" -- "$f"; then printf '%s: Muse session id\n' "$f"; bad=1; fi
+    if grep -qE '\bs-[0-9A-HJKMNP-TV-Z]{26}\b|\bworker-[0-9a-f]{32}\b' -- "$f"; then printf '%s: Pohunek id\n' "$f"; bad=1; fi
+    if grep -qE '\b00-[0-9a-f]{32}-[0-9a-f]{16}-0[01]\b' -- "$f"; then printf '%s: trace context\n' "$f"; bad=1; fi
+    if grep -qE '\b(resp|rs|msg|fc|call)_[A-Za-z0-9]{16,}' -- "$f"; then printf '%s: provider id\n' "$f"; bad=1; fi
+    if grep -qE 'POHUNEK_[A-Z0-9_]*=[^<"]' -- "$f"; then printf '%s: Pohunek handshake value\n' "$f"; bad=1; fi
+  done < <(find "$@" -type f -print0)
+  ((bad == 0))
+}
+
+cmd_scan() {
+  local name="" exclude="" secret_only="" dirs=()
+  while (($# > 0)); do
+    case "$1" in
+      --secret-env) name="${2:?}"; shift 2 ;;
+      --exclude) exclude="${2:?}"; shift 2 ;;
+      --secret-only) secret_only=1; shift ;;
+      *) dirs+=("$1"); shift ;;
+    esac
+  done
+  [[ -n "$name" && ${#dirs[@]} -gt 0 ]] || usage
+  [[ "$name" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "--secret-env takes a variable name"
+  test -n "${!name:-}" || die "$name is not set; the scan needs it as a needle"
+  local secret="${!name}"
+  ((${#secret} >= 16)) || die "$name is shorter than 16 characters; refusing a needle that weak"
+  if scan_dirs "$secret" "$exclude" "$secret_only" "${dirs[@]}"; then
+    log "scan clean: ${dirs[*]}"
+  else
+    die "the scan found the hits above; nothing may be committed"
+  fi
+}
+
+cmd_scan_profile() {
+  local profile="" rest=()
+  while (($# > 0)); do
+    case "$1" in
+      --profile) profile="${2:?}"; shift 2 ;;
+      *) rest+=("$1"); shift ;;
+    esac
+  done
+  [[ -f "$profile" ]] || die "no profile at $profile"
+  # The value lives only in this process and its scan; stderr is dropped so a
+  # parse error cannot echo a line of the file.
+  local value
+  value="$(python3 -I -c 'import sys, tomllib
+with open(sys.argv[1], "rb") as f:
+    sys.stdout.write(tomllib.load(f)["env"]["META_API_KEY"])' "$profile" 2>/dev/null)" ||
+    die "the profile has no readable [env] META_API_KEY"
+  META_API_KEY="$value" cmd_scan --secret-env META_API_KEY "${rest[@]}"
+}
+
+main() {
+  local cmd="${1:-}"
+  shift || true
+  local args=()
+  while (($# > 0)); do
+    case "$1" in
+      --root) ROOT="${2:?}"; shift 2 ;;
+      *) args+=("$1"); shift ;;
+    esac
+  done
+  [[ -z "$ROOT" ]] || ROOT="$(cd "$(dirname "$ROOT")" 2>/dev/null && pwd -P)/$(basename "$ROOT")"
+  case "$cmd" in
+    setup) cmd_setup "${args[@]}" ;;
+    daemon) cmd_daemon "${args[@]}" ;;
+    profile) cmd_profile ;;
+    stub) cmd_stub "${args[@]}" ;;
+    scenario) cmd_scenario "${args[@]}" ;;
+    spend) cmd_spend ;;
+    update-check) cmd_update_check ;;
+    collect) cmd_collect "${args[@]}" ;;
+    scan) cmd_scan "${args[@]}" ;;
+    scan-profile) cmd_scan_profile "${args[@]}" ;;
+    -h | --help | *) usage ;;
+  esac
+}
+
+main "$@"

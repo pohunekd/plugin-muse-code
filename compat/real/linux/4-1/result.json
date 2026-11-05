@@ -1,0 +1,31 @@
+{
+  "scenario": "4",
+  "outcome": "pass",
+  "note": "",
+  "root_steps": 2,
+  "step_cap": 3,
+  "wall_seconds": 42,
+  "wall_cap": 180,
+  "run_spend": {
+    "calls": 20,
+    "input_tokens": 418923,
+    "output_tokens": 14502,
+    "reasoning_tokens": 11812,
+    "cached_tokens": 216968,
+    "usd": 0.63548825
+  },
+  "checks": [
+    {
+      "check": "question-notification",
+      "ok": true
+    },
+    {
+      "check": "blocked-then-idle",
+      "ok": true
+    },
+    {
+      "check": "screen-red",
+      "ok": true
+    }
+  ]
+}

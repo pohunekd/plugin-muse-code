@@ -1,0 +1,43 @@
+{
+  "scenario": "7",
+  "outcome": "evidence",
+  "note": "recorded as F8 evidence, not as a pass",
+  "root_steps": 1,
+  "step_cap": 2,
+  "wall_seconds": 19,
+  "wall_cap": 120,
+  "run_spend": {
+    "calls": 37,
+    "input_tokens": 792816,
+    "output_tokens": 21290,
+    "reasoning_tokens": 16384,
+    "cached_tokens": 494548,
+    "usd": 1.1511345
+  },
+  "checks": [
+    {
+      "check": "sessionstart-clear",
+      "ok": true
+    },
+    {
+      "check": "clear-id-is-new",
+      "ok": true
+    },
+    {
+      "check": "clear-hook-has-no-pohunek-env",
+      "ok": true
+    },
+    {
+      "check": "new-session-dir",
+      "ok": true
+    },
+    {
+      "check": "screen-FRESH",
+      "ok": true
+    },
+    {
+      "check": "reference-stays-before-clear (F8 reproduced)",
+      "ok": true
+    }
+  ]
+}

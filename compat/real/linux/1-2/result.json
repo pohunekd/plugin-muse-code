@@ -1,0 +1,43 @@
+{
+  "scenario": "1",
+  "outcome": "pass",
+  "note": "",
+  "root_steps": 1,
+  "step_cap": 2,
+  "wall_seconds": 16,
+  "wall_cap": 120,
+  "run_spend": {
+    "calls": 40,
+    "input_tokens": 830963,
+    "output_tokens": 21706,
+    "reasoning_tokens": 16583,
+    "cached_tokens": 494548,
+    "usd": 1.201432
+  },
+  "checks": [
+    {
+      "check": "working-then-idle",
+      "ok": true
+    },
+    {
+      "check": "screen-PONG",
+      "ok": true
+    },
+    {
+      "check": "native-is-uuid",
+      "ok": true
+    },
+    {
+      "check": "native-is-newest-session-dir",
+      "ok": true
+    },
+    {
+      "check": "sessionstart-startup",
+      "ok": true
+    },
+    {
+      "check": "no-root-pretooluse",
+      "ok": true
+    }
+  ]
+}

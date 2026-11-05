@@ -1,0 +1,35 @@
+{
+  "scenario": "6",
+  "outcome": "pass",
+  "note": "",
+  "root_steps": 1,
+  "step_cap": 2,
+  "wall_seconds": 21,
+  "wall_cap": 120,
+  "run_spend": {
+    "calls": 33,
+    "input_tokens": 739306,
+    "output_tokens": 20704,
+    "reasoning_tokens": 16158,
+    "cached_tokens": 494548,
+    "usd": 1.080796
+  },
+  "checks": [
+    {
+      "check": "resume-args",
+      "ok": true
+    },
+    {
+      "check": "screen-PONG-after-question",
+      "ok": true
+    },
+    {
+      "check": "sessionstart-resume",
+      "ok": true
+    },
+    {
+      "check": "native-unchanged",
+      "ok": true
+    }
+  ]
+}
