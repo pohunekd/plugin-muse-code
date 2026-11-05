@@ -1,7 +1,7 @@
 
   Muse Code 1.4.14
 
-To continue this session, run muse resume <muse-session-31>
+To continue this session, run muse resume <muse-session-1>
 ────────────────────────────────────────────────────────────────────────────────
 ❯ 
 ────────────────────────────────────────────────────────────────────────────────

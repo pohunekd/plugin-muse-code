@@ -5,7 +5,7 @@
 
   Muse Code 1.4.14
 
-  resumed session <muse-session-31>
+  resumed session <muse-session-1>
 
 ❯ Reply with exactly the word PONG and nothing else. Do not call any tool.      
 

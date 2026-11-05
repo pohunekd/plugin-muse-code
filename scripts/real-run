@@ -36,7 +36,11 @@
 #                 3 aborted, 4 recorded as evidence only (scenario 7)
 #   spend         prints the estimated spend of the run from PostLLMCall usage
 #   collect       writes the redacted evidence of the latest run of each
-#                 scenario; an earlier run of a scenario is left out
+#                 scenario and of an earlier run whose session another
+#                 scenario continued (6 and 7 continue a scenario-1 run);
+#                 any other earlier run is left out. It fails when a logged
+#                 PreToolUse of any thread breaks the tool rules of its
+#                 scenario
 #   scan          fails when evidence holds the value of $NAME, a home path,
 #                 a host value or an unredacted id; prints file names only.
 #                 --secret-only searches the value alone (a whole run root)
@@ -417,12 +421,14 @@ root_count() {
   jq -s "$ENV_JQ"' [.[] | select(root)] | length' "${files[@]}"
 }
 
-# Estimated spend in USD over every PostLLMCall of the run (all threads).
+# Estimated spend in USD over every PostLLMCall of the run (all threads). Muse
+# reports the cache reads twice, as `cache_read_tokens` and `cached_tokens`
+# with the same value, so only one of them is counted.
 spend_usd() {
   local files
   mapfile -t files < <(hook_files 0 PostLLMCall)
   if ((${#files[@]} == 0)); then
-    jq -n '{calls: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cached_tokens: 0, usd: 0}'
+    jq -n '{calls: 0, input_tokens: 0, output_tokens: 0, reasoning_tokens: 0, cache_read_tokens: 0, usd: 0}'
     return
   fi
   jq -s --argjson pin "$PRICE_INPUT_PER_M" --argjson pout "$PRICE_OUTPUT_PER_M" '
@@ -431,7 +437,7 @@ spend_usd() {
        input_tokens: ([$u[].input_tokens // 0] | add),
        output_tokens: ([$u[].output_tokens // 0] | add),
        reasoning_tokens: ([$u[].reasoning_tokens // 0] | add),
-       cached_tokens: ([$u[] | (.cached_tokens // 0) + (.cache_read_tokens // 0)] | add)}
+       cache_read_tokens: ([$u[] | .cache_read_tokens // .cached_tokens // 0] | add)}
     | .usd = ((.input_tokens * $pin + (.output_tokens + .reasoning_tokens) * $pout) / 1000000)' "${files[@]}"
 }
 
@@ -465,6 +471,14 @@ scenario_caps() { # <n>: steps wall allowed-root-tools
     6) echo "2 120 -" ;;
     7) echo "2 120 -" ;;
     *) die "unknown scenario: $1" ;;
+  esac
+}
+
+scenario_probe() { # <n>: the one shell command the scenario allows
+  case "$1" in
+    2) printf '%s\n' "$PROBE2" ;;
+    3) printf '%s\n' "$PROBE3" ;;
+    *) echo "" ;;
   esac
 }
 
@@ -758,7 +772,7 @@ approval_scenario() { # <probe> <key>
 
 scenario_2() {
   SNAME="s2r$RUN_N"
-  approval_scenario "$PROBE2" "$P2" Enter
+  approval_scenario "$(scenario_probe 2)" "$P2" Enter
   check blocked-then-idle activity_ok blocked
   check probe-file-written grep -qxF approval-probe "$REPO/approval-probe.txt"
   pk session stop "$SID" >/dev/null
@@ -767,7 +781,7 @@ scenario_2() {
 
 scenario_3() {
   SNAME="s3r$RUN_N"
-  approval_scenario "$PROBE3" "$P3" Escape
+  approval_scenario "$(scenario_probe 3)" "$P3" Escape
   check blocked-then-idle activity_ok blocked
   check probe-file-absent test ! -e "$REPO/abort-probe.txt"
   pk session stop "$SID" >/dev/null
@@ -962,6 +976,37 @@ latest_run_of() {
   find "$ROOT/scenarios" -mindepth 1 -maxdepth 1 -name "$1-*" -printf '%f\n' | sort -t- -k2,2n | tail -n 1
 }
 
+# kept_run <scenario dir>: true for the latest run of its scenario and for a run
+# whose session another scenario continued (its session.id is the same).
+kept_run() {
+  local d="$1" name="${1##*/}" other
+  [[ "$(latest_run_of "${name%%-*}")" == "$name" ]] && return 0
+  [[ -s "$d/session.id" ]] || return 1
+  for other in "$ROOT"/scenarios/*/session.id; do
+    other="${other%/session.id}"
+    [[ "${other##*/}" != "${name%%-*}"-* ]] || continue
+    cmp -s "$d/session.id" "$other/session.id" && return 0
+  done
+  return 1
+}
+
+# check_window_tools <scenario> <from-ns> <to-ns>: the check_tools verdict over
+# every thread's PreToolUse in the window, including calls logged after the
+# scenario stopped polling (observer threads start after the root's Stop).
+check_window_tools() {
+  local scn="$1" from="$2" to="$3" allowed f s verdict
+  read -r _ _ allowed <<<"$(scenario_caps "$scn")"
+  for f in "$HOOKLOG"/*-PreToolUse.json; do
+    [[ -e "$f" ]] || continue
+    s="${f##*/}"
+    s="${s%%-*}"
+    ((s >= from && s < to)) || continue
+    verdict="$(jq -r "$ENV_JQ $TOOL_JQ" --arg repo "$REPO" --arg allowed "$allowed" \
+      --arg probe "$(scenario_probe "$scn")" "$f")"
+    [[ "$verdict" == ok ]] || die "scenario $scn: $verdict (${f##*/}); no evidence is written"
+  done
+}
+
 cmd_collect() {
   load_state
   local out="" d n f event s stage
@@ -991,11 +1036,14 @@ cmd_collect() {
   for ((i = 0; i < ${#dirs[@]}; i++)); do
     d="${dirs[i]}"
     name="${d##*/}"
-    # A later run of the same scenario replaces this one; its window still
-    # bounds the scenario before it.
-    [[ -n "$(latest_run_of "${name%%-*}")" && "$(latest_run_of "${name%%-*}")" != "$name" ]] && continue
     to=9223372036854775807
     ((i + 1 < ${#dirs[@]})) && to="${starts[i + 1]}"
+    # Calls before the first scenario fall under the first one's rules.
+    check_window_tools "${name%%-*}" "$((i == 0 ? 0 : starts[i]))" "$to"
+    # A later run of the same scenario replaces this one unless another
+    # scenario continued its session; its window still bounds the scenario
+    # before it.
+    kept_run "$d" || continue
     mkdir -p "$stage/$name/hooks"
     for f in "$d"/samples.jsonl "$d"/result.json "$d"/ps.txt "$d"/subagents.json "$d"/identity.json "$d"/screen-*.txt; do
       [[ -e "$f" ]] && cp "$f" "$stage/$name/"
