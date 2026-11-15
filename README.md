@@ -119,7 +119,7 @@ A new Muse release is captured by re-running the kit before the lock moves:
 
 ## Install and use
 
-The plugin is not in the plugin index yet. Install it from a checkout:
+The plugin is not in the plugin index yet. Once admitted, install it by id (core >= 0.40.0): `pohunek plugin install pohunek.runtime.muse`. Until then, install it from a checkout:
 
 ```bash
 cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
