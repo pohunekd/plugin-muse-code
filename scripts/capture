@@ -941,6 +941,8 @@ main() {
     vm_guard
     for arg in "${steps[@]}"; do
       [[ "$arg" != install ]] || die "CAPTURE_VM=1 cannot run the install step"
+      # version reads the installer download and install output, which a VM run never has.
+      [[ "$arg" != version ]] || die "CAPTURE_VM=1 cannot run the version step"
     done
     CAPTURE_HOST_USER="$(id -un)"
     CAPTURE_HOST_HOSTNAME="$(hostname)"
@@ -1021,10 +1023,13 @@ main() {
 # user and the fixed capture root. Host root files then keep their owner, which
 # an unprivileged user namespace cannot map.
 vm_guard() {
-  local virt links
+  local virt container links
   [[ "$PLATFORM" == Linux ]] || die "CAPTURE_VM=1 is for a Linux guest"
   virt="$(systemd-detect-virt --vm 2>/dev/null)" || die "CAPTURE_VM=1 outside a virtual machine"
   [[ "$virt" == kvm || "$virt" == qemu ]] || die "CAPTURE_VM=1 in an unexpected hypervisor: $virt"
+  # --container exits non-zero when it finds none, so its output decides.
+  container="$(systemd-detect-virt --container 2>/dev/null || true)"
+  [[ "$container" == none ]] || die "CAPTURE_VM=1 inside a container: ${container:-unknown}"
   links="$(ip -o link | awk -F': ' '{print $2}' | tr '\n' ' ')"
   [[ "$links" == "lo " ]] || die "the VM has network interfaces: $links"
   (($(id -u) != 0)) || die "CAPTURE_VM=1 runs as a normal user"
