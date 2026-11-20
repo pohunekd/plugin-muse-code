@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
+| Status | **pre-release (P3)**: admitted in the official plugin index (0.1.0 since `index-1795175178`, 0.2.0 since `index-1795199465`); 0.1.0 was installed by id on Linux x86_64 and macOS arm64 with core v0.43.1, installing 0.2.0 by id is `unverified`; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -123,7 +123,7 @@ A new Muse release is captured by re-running the kit before the lock moves:
 
 ## Install and use
 
-The plugin is admitted in the official plugin index since `index-1795175178` (version 0.1.0, which launches every session with `--trust-workspace`; version 0.2.0 is not admitted yet). Install it by id (core >= 0.41.0 for version 0.2.0, tested with v0.43.1): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
+The plugin is admitted in the official plugin index: version 0.1.0 since `index-1795175178` (it launches every session with `--trust-workspace`) and version 0.2.0 since `index-1795199465`. Install it by id (core >= 0.41.0 for version 0.2.0, tested with v0.43.1): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
 
 ```bash
 cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
