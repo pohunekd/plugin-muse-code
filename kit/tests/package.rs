@@ -94,7 +94,7 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
     );
     assert_eq!(
         format!("{:?}", definition.native()),
-        r#"Some(NativeSessionLaunch { reference_kind: Id, resume_args: NativeArgs([Literal("resume"), Reference]), fork_args: None, assigned: None })"#
+        r#"Some(NativeSessionLaunch { reference_kind: Id, resume_args: NativeArgs([Literal("resume"), Reference]), assigned: None })"#
     );
     let home = definition
         .config_home()
@@ -233,6 +233,8 @@ fn detector_for(definition: &RuntimeDefinition, now: Instant, rows: u16, columns
             manifest: Some(std::sync::Arc::clone(definition.manifest())),
             input_readiness: definition.input_readiness(),
             launch_name: None,
+            runtime_version: None,
+            gate_waived: false,
         },
     )
 }
