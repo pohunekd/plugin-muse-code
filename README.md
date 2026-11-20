@@ -72,7 +72,8 @@ model.
 
 Needs bash 4+, tmux, curl, jq, sed, awk, perl, sha256sum, git, ps, socat, ip, mount,
 hostname and util-linux `unshare` 2.38+ with unprivileged user, network, mount
-and UTS namespaces (`--map-root-user`, `--map-user`).
+and UTS namespaces (`--map-root-user`, `--map-user`). `CAPTURE_VM=1` also needs
+`systemd-detect-virt`.
 
 ```bash
 scripts/capture --root /path/to/scratch --dry-run all   # plan and tool check; no network
@@ -92,7 +93,10 @@ The profile does not confine the filesystem: the CLI can still read the real use
 
 On Linux, `CAPTURE_VM=1` runs the steps without namespaces inside a KVM or QEMU
 guest that has no network interface (a `-nic none` VM), as a normal user with
-`--root /run/capture-root`; the kit refuses it anywhere else. The evidence of
+`--root /run/capture-root`; the kit refuses it anywhere else, containers
+included (`systemd-detect-virt --container` must print `none`). The steps a VM
+run supports are `login trust turn update-notice hooks sessions stub`; `install`
+and `version` are refused, because they need the installer download. The evidence of
 the `turn`, `sessions` and `stub` steps, the idle, resume and seed screens
 among it, comes from such a run.
 
@@ -250,7 +254,7 @@ unverified.
 | Resume and fork | `muse resume <id>` works for a root session and for a fork; `/fork` prints the fork id and `muse resume <id>`; `/clear` starts a new session and prints the old id |
 | Prompt seed | `muse "<prompt>"` submits the prompt as the first turn |
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
-| Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working |
+| Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working; the macOS `working` screens read working through `working_status_line`; the launcher update-notice line alone (Linux and macOS captures) reads working through `launcher_update_notice` |
 | Launch (P1, `scripts/smoke`) | Through a pohunek build of core `368a2d32c` (v0.39.0) in a loopback-only namespace: `--agent muse`, with `{"schema_version":1,"provider":"echo"}` in Muse's `settings.json`, launches `muse-bin-<release> --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, shows no trust dialog, reaches the composer, renders an echo turn, and after stop `session resume` runs `muse-bin-<release> --trust-workspace -c managed_hooks_env_vars=[...] resume <id>`; no `trust.json` is left; with a profile of `--trust-workspace --provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
 | Identity and resume (P2, `scripts/smoke`) | With `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args, --trust-workspace among them> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with `TBH_MANAGED_HOOKS_PATH` and `POHUNEK_SESSION_ID` in its environment and the reference unchanged |
 | Recovery and profile key (P3, `scripts/smoke`) | With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
@@ -333,7 +337,8 @@ the install files were unchanged, with the network reachable.
 - The terminal-side update banner driven by the release manifest (`urgency`,
   `notification_text`); the launcher's own update notice is captured.
 - That `MUSE_NO_AUTO_UPDATE=1` leaves the network untouched for the binary itself (the launcher part is read from its source and observed; the namespace has no route, so an attempt would fail silently).
-- The update-notice rule `launcher_update_notice` (the launcher line only; no TUI screen with a notice was captured).
+- The update-notice rule `launcher_update_notice` on a drawn TUI: the kit test reads the captured launcher line alone, before the TUI draws. `compat/screens/update-notice/120.txt` does show the notice above the composer, and it reads idle because `idle_composer` outranks the rule.
+- `compat/screens/update-notice/` comes from the user-namespace capture, not from the VM run. Its footer carries Muse's `system SSH configuration projection omitted` notice, which the VM captures lack; the notice line itself is unaffected. A VM recapture is not done.
 - Any macOS behaviour of the package (P4).
 
 Prior art cited by the plan (agent-deck, par-term, Zentty, Paradev, t3code,

@@ -402,6 +402,49 @@ fn the_terminal_title_reads_working_only_behind_a_spinner_frame() {
 }
 
 #[test]
+fn the_macos_working_screens_read_working_through_the_status_line_rule() {
+    let definition = installed_definition();
+    for width in [120, 200] {
+        let text = read(&format!("compat/macos-arm64/screens/working/{width}.txt"));
+        assert!(
+            text.contains("\u{25c6} Thinking (0s \u{b7} esc to interrupt)"),
+            "the capture shows a status line with the interrupt hint at {width}"
+        );
+        assert_eq!(
+            screen_activity(&definition, &text, width),
+            Some(AgentActivity::Working),
+            "working/{width}.txt: the composer below the status line must not win"
+        );
+    }
+}
+
+#[test]
+fn the_launcher_update_notice_line_reads_working_on_its_own() {
+    let definition = installed_definition();
+    for raw in [
+        "compat/screens/update-notice/raw-head.txt",
+        "compat/macos-arm64/screens/update-notice/raw-head.txt",
+    ] {
+        let head = read(raw);
+        let line = head
+            .lines()
+            .next()
+            .and_then(|l| l.strip_suffix("<CR>"))
+            .unwrap_or_else(|| panic!("{raw}: the first line ends with the <CR> marker"));
+        let words: Vec<&str> = line.split(' ').collect();
+        assert!(
+            words.len() == 6 && words[..3] == ["Muse", "Code", "updated"] && words[4] == "->",
+            "{raw}: {line:?} is the launcher notice"
+        );
+        assert_eq!(
+            screen_activity(&definition, line, 120),
+            Some(AgentActivity::Working),
+            "{raw}: only launcher_update_notice reads this line"
+        );
+    }
+}
+
+#[test]
 fn prose_that_quotes_a_footer_or_a_dialog_reads_nothing() {
     let definition = installed_definition();
     let rule = "\u{2500}".repeat(40);
