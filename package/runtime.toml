@@ -6,20 +6,29 @@
 
 schema = 1
 id = "pohunek.runtime.muse"
-version = "0.1.0"
+version = "0.2.0"
 runtime_api = 1
-requires = ["version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1", "config-home-subdir-v1", "integration-muse-hook-v1", "transcripts-data-root-v1"]
+requires = ["checkout-trust-args-v1", "version-probe-revision-v1", "launch-env-v1", "input-refuse-while-blocked-v1", "config-home-subdir-v1", "integration-muse-hook-v1", "transcripts-data-root-v1"]
 
 [runtime]
 id = "muse"
 name = "Muse Code"
 program = "muse"
-# A Pohunek project is registered on purpose, so every launch trusts its
-# workspace and the trust dialog never holds it. Trust loads the checkout's
-# project hooks, rules and skills, and project hooks run outside Muse's
-# sandbox, so a checkout of a foreign PR or fork head runs that head's hooks
-# (#18). Resume reuses these arguments; fork is unsupported.
-args = ["--trust-workspace"]
+# Trusting a workspace loads its project hooks, rules and skills, and project
+# hooks run outside Muse's sandbox, so the flag is not a launch argument: core
+# appends it only when the checkout is the operator's own (a listed public
+# GitHub repository whose declared paths equal the remote HEAD tree). Any
+# other checkout shows Muse's trust dialog unless Muse's own trust record
+# already trusts its root; the operator answers the dialog through
+# `pohunek attach`. Resume evaluates the same check.
+# Declared paths (ad-hoc probe of Muse 1.4.14, not a kit capture; completeness
+# is unverified): skills load from `.agents/skills`, `.claude/skills` and
+# `.codex/skills`; rules from `AGENTS.md` (`CLAUDE.md` is named as a rules file
+# and loses to it); hooks from `.muse/hooks.json`. A declared path that does
+# not exist passes the check.
+args = []
+trusted_checkout_args = ["--trust-workspace"]
+trusted_checkout_paths = [".agents", ".claude", ".codex", ".muse", "AGENTS.md", "CLAUDE.md"]
 detect_manifest = "detect.toml"
 # Typed into the composer once it is drawn: a positional argument would let a
 # prompt such as `logout` select a subcommand.
@@ -55,9 +64,11 @@ supported = true
 reference_kind = "id"
 args = ["resume", "{reference}"]
 
-# Muse forks only inside its TUI (`/fork`); no launch argument forks.
-[fork]
-supported = false
+# Muse forks only inside its TUI (`/fork`); no launch argument forks, so the
+# descriptor declares no fork. Leaving out `[fork]` is also what makes cores
+# before 0.41.0 refuse this descriptor, which they require it to carry; those
+# cores do not drop a profile's `--trust-workspace`, so the table must not
+# return while 0.2.0 relies on that.
 
 # Muse chooses the session id; the root thread's SessionStart hook reports it
 # with the first turn. After `/clear` Muse 1.4.14 runs that hook without the

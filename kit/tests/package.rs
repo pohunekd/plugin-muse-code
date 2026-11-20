@@ -62,10 +62,25 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
         definition.program(),
         &LaunchProgram::Fixed("muse".to_owned())
     );
+    assert!(
+        definition.default_args().is_empty(),
+        "no launch argument trusts a workspace unconditionally"
+    );
+    let trust = definition
+        .checkout_trust()
+        .expect("the descriptor declares checkout trust");
+    assert_eq!(trust.args(), ["--trust-workspace"]);
     assert_eq!(
-        definition.default_args(),
-        ["--trust-workspace"],
-        "every launch trusts the registered workspace"
+        trust.paths(),
+        [
+            ".agents",
+            ".claude",
+            ".codex",
+            ".muse",
+            "AGENTS.md",
+            "CLAUDE.md"
+        ],
+        "the paths Muse loads per the D1 probe and the hook captures"
     );
     assert!(
         !definition.prompt_arg(),
