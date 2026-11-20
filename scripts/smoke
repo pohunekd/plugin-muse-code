@@ -45,6 +45,10 @@ PLACEHOLDER_KEY="smoke-placeholder-not-a-key"
 # Initial-input acknowledgement window, and the poll interval and attempts used
 # to catch the short `working` phase of a delayed echo turn.
 INPUT_ACK_MS=8000
+# Times a session with an initial input is created when core rolls it back as
+# `session_input_not_ready`: Muse can need longer than core's startup grace to
+# draw its composer on a slow host.
+INPUT_ATTEMPTS=3
 FAST_POLL_SECONDS=0.25
 WORKING_POLLS=$((WAIT_SECONDS * 4))
 # Bound on waiting for the daemon after teardown.
@@ -244,6 +248,16 @@ args = ["--trust-workspace", "--provider", "echo"]
 EOF
 chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-echo.toml" "$HOME_DIR/.config/pohunek/agents/muse-flag.toml"
 
+new_with_input() { # <result file> <session new arguments...>
+  local out="$1" attempt code
+  shift
+  for ((attempt = 1; attempt <= INPUT_ATTEMPTS; attempt++)); do
+    pk session new "$@" --json >"$out" || true
+    code="$(jq -r '.err.code // empty' "$out")"
+    [[ "$code" == session_input_not_ready ]] || return 0
+    log "initial input not ready (attempt $attempt of $INPUT_ATTEMPTS), creating the session again"
+  done
+}
 activity_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .activity // "none"'; }
 session_id() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .id'; }
 muse_pid_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .pid'; }
@@ -321,8 +335,8 @@ rm "$muse_settings"
 log "bare launch: trusted by Muse's record without the flag on create and resume, composer drawn, update flag set"
 
 # --- 2. echo turn: composer ready, input accepted, working then idle ------
-pk session new --agent muse-echo --cwd "$WS" --name echo --input "$PROMPT" \
-  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/echo-new.json"
+new_with_input "$ROOT/echo-new.json" --agent muse-echo --cwd "$WS" --name echo --input "$PROMPT" \
+  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes
 [[ "$(jq -r '.ok.prompt_delivered' "$ROOT/echo-new.json")" == "true" ]] || die "the initial input did not start a turn"
 echo_id="$(jq -r '.ok.id' "$ROOT/echo-new.json")"
 reply_seen() { pk session screen "$echo_id" | grep -q "echo: $PROMPT"; }
@@ -407,8 +421,8 @@ args = ["--provider", "meta", "--base-url", "http://127.0.0.1:$STUB_PORT"]
 META_API_KEY = "$PLACEHOLDER_KEY"
 EOF2
 chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-stub.toml"
-pk session new --agent muse-stub --cwd "$WS" --name stub --input "stub hello" \
-  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json >"$ROOT/stub-new.json"
+new_with_input "$ROOT/stub-new.json" --agent muse-stub --cwd "$WS" --name stub --input "stub hello" \
+  --input-ack-timeout-ms "$INPUT_ACK_MS" --yes
 [[ "$(jq -r '.ok.prompt_delivered' "$ROOT/stub-new.json")" == "true" ]] || die "the stub turn did not start"
 stub_id="$(session_id stub)"
 stub_reply() { pk session screen "$stub_id" | grep -q 'stub reply'; }
