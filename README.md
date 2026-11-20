@@ -123,7 +123,7 @@ A new Muse release is captured by re-running the kit before the lock moves:
 
 ## Install and use
 
-The plugin is admitted in the official plugin index since `index-1795175178` (version 0.1.0). Install it by id (core >= 0.40.0): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
+The plugin is admitted in the official plugin index since `index-1795175178` (version 0.1.0, which launches every session with `--trust-workspace`; version 0.2.0 is not admitted yet). Install it by id (core >= 0.41.0 for version 0.2.0, tested with v0.43.1): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
 
 ```bash
 cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
@@ -141,12 +141,25 @@ work.
 
 What the package does:
 
-- Launches `muse --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` (owner decision
-  2026-11-05: a Pohunek project is registered on purpose, so its workspace is
-  trusted); a resume reuses the arguments its session was created with. A
-  trusted workspace loads project hooks, rules and skills, and project hooks
-  run outside Muse's sandbox. The flag trusts the run only; Muse saves no trust
-  decision for it. See the checkout gap under Limits.
+- Launches `muse` with `MUSE_NO_AUTO_UPDATE=1`. `--trust-workspace` is not a
+  launch argument: the descriptor declares it as `trusted_checkout_args` and core
+  appends it (also on resume) only for the operator's own checkout, where core
+  proves over https from GitHub that the project's `origin_url` is a public
+  repository listed in `[checkout_trust] trusted_repositories` of `service.toml`
+  and that every declared path equals the tree of the remote `HEAD`
+  (`checkout-trust-args-v1`; core >= 0.41.0, the release that decides the
+  arguments on the create-time checkout and drops a profile's flag). The declared
+  paths are `.agents`, `.claude`, `.codex`, `.muse`, `AGENTS.md` and
+  `CLAUDE.md`: an ad-hoc probe of Muse 1.4.14 (loopback only, echo provider; not
+  a kit capture) loaded project skills from `.agents/skills`, `.claude/skills`
+  and `.codex/skills` and named `AGENTS.md` and `CLAUDE.md` as rules files, and
+  the hook captures use `.muse/hooks.json`. That list is what the probe saw;
+  that no other path loads (project plugin config, nested rules files) is
+  unverified. A path that does not exist passes the check. A trusted workspace loads
+  project hooks, rules and skills, and project hooks run outside Muse's sandbox.
+  Any other checkout (a fork or foreign-PR head, an unlisted or private
+  repository, a dirty declared path, no route to GitHub) gets no flag and shows
+  Muse's trust dialog.
 - Refuses `session input` with `session_input_blocked` while any dialog shows
   (trust, sign-in, API key, approval, question): Muse takes Enter as the choice
   of the preselected entry, so text sent while the trust dialog shows would
@@ -168,20 +181,38 @@ What the package does:
 
 Limits:
 
-- Trust follows the registered project, not the checked-out head: a
-  registered repository whose checkout holds a foreign PR or fork head loads
-  that head's `.muse` hooks, and they run outside Muse's sandbox with the
-  operator's rights. Never run a Muse session on a foreign PR or fork checkout.
-  Core issue [zajca/pohunek#1925](https://github.com/zajca/pohunek/issues/1925)
-  lets the plugin pass the flag through `trusted_checkout_args` only for
-  checkouts that pass a provenance check; #18 tracks the move.
-- A host profile's `args` replace the descriptor's, so a profile over `muse`
-  restates `--trust-workspace`. A profile that leaves it out shows the trust
-  dialog in every root Muse does not trust yet; `session new --input` there
-  fails with `session_input_not_ready` after the startup grace, and the session
-  is rolled back: start it without `--input`, answer the dialog in
-  `pohunek attach`, then send input. Muse keeps the answer per workspace root,
-  so a new worktree asks again (architect probe, not a kit capture).
+- Operator step: add `owner/repo` (lower case) to `[checkout_trust]
+  trusted_repositories` in the host's `service.toml` for every repository whose
+  checkouts Muse may trust. Only public GitHub repositories qualify, and the
+  declared paths must match the remote `HEAD` exactly; an untracked or ignored
+  file below a declared path withholds the flag. Muse itself writes there:
+  its built-in skills name `.agents/plans`, `.agents/memory` and
+  `.agents/skill-drafts` (unverified, read from the binary's skill texts), so a
+  checkout where Muse has written them loses the flag until they are committed
+  or removed, and `.claude` or `.codex` local settings do the same. Core checks
+  only the declared paths, not what a hook runs: a `.muse/hooks.json` hook that
+  calls a script outside them (for example `./scripts/x.sh`) runs that file
+  unchecked, so list only repositories whose hooks and skills reference nothing
+  outside the declared paths. This follows the owner's fail-closed ruling on
+  #18, and it also withholds trust from private and unlisted repositories.
+- A withheld flag leaves Muse's trust dialog on screen in every root Muse does
+  not trust yet; `session new --input` there fails with
+  `session_input_not_ready` after the startup grace, and the session is rolled
+  back: start it without `--input`, answer the dialog in `pohunek attach`, then
+  send input. Muse keeps the answer per workspace root in
+  `$XDG_CONFIG_HOME/muse/trust.json`, so a new worktree asks again, and a root
+  the operator answered once is trusted by Muse from then on whatever core
+  decides.
+- A host profile cannot force `--trust-workspace`: core v0.41.0 and later drop a
+  run of the declared flag from descriptor and profile `args` (on v0.40.x a profile
+  that names the flag still trusts new sessions, per the v0.41.0 changelog). A profile that adds
+  `--yolo` (it also trusts the workspace, and disables approval and the sandbox)
+  bypasses the check; do not use it on a checkout you did not verify.
+- The positive case (a listed public checkout launches with the flag, Muse then
+  skips the dialog) needs github.com, which the loopback-only smoke cannot
+  reach: it rests on core's own tests (`crates/daemon/tests/package_methods.rs`,
+  `crates/daemon/tests/health_socket/agent_options.rs`) and is unverified with
+  Muse end to end.
 - Session identity comes from the root thread's `SessionStart` hook, which Muse
   reports with a turn (no capture shows one before the first turn): a session
   stopped before its first turn has no reference, and `session resume` refuses
@@ -190,7 +221,8 @@ Limits:
   session's hooks without the variables passed by `-c managed_hooks_env_vars`,
   so the reporter cannot reach its session, and `session resume` continues the
   conversation from before `/clear` (core issue pending).
-- Fork is unsupported: Muse forks only inside its TUI (`/fork`).
+- Fork is unsupported: Muse forks only inside its TUI (`/fork`), so the
+  descriptor declares no fork.
 - Background observer threads (`subagent_id` ending in `-reminder`) are never
   Pohunek subagents. A subagent the model spawns is reported with no role,
   because `SubagentStart` and `SubagentStop` carry none. They carry two ids:
@@ -236,7 +268,7 @@ unverified.
 |---|---|
 | Version line | `muse --version` prints `Muse Code 1.4.14 (1.4.14-R7309.1)`; the release id is `X.Y.Z-R<n>.<m>` |
 | Install | Launcher script `muse` plus `.muse-version`, `.muse-release-info.json` and the static binary `muse-bin-<release>`; the pane process is the binary, so `comm` is `muse-bin-<release>` truncated by the kernel |
-| Trust dialog | `Do you trust this workspace?` with `1  Trust and continue` / `2  Quit`; `--trust-workspace` skips it and writes no `trust.json` (`scripts/smoke`) |
+| Trust dialog | `Do you trust this workspace?` with `1  Trust and continue` / `2  Quit`; `--trust-workspace` skips it and writes no `trust.json` (`scripts/smoke`, earlier descriptor); answering the dialog writes `$XDG_CONFIG_HOME/muse/trust.json` as `{"schema_version":1,"projects":{"<absolute workspace>":{"decision":"trusted"}}}` and leaves the workspace untouched (probe of 1.4.14 in the loopback-only namespace, echo provider; not a kit capture) |
 | Login | Two entries, `Log in with browser` and `Set an API key`; the key prompt reads `Paste your Model API key.` |
 | Idle | Composer prompt `❯`, footer `<model> · <cwd> · Auto-review`; `⟩` is the cursor of dialogs and pickers, not the idle prompt |
 | Working | `◇`/`◈ Thinking (Ns · esc to interrupt)`, also `Calling tools`, `Double checking`, `Request user input <header> — running` (glyph alternates) |
@@ -255,8 +287,8 @@ unverified.
 | Prompt seed | `muse "<prompt>"` submits the prompt as the first turn |
 | Model-free modes | `--provider echo` (credential-free) and `--base-url` against a loopback endpoint both work |
 | Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working; the macOS `working` screens at 120 and 200 columns (the `◆` status line) read working through `working_status_line`; the launcher update-notice line alone (Linux and macOS captures) reads working through `launcher_update_notice`, while the drawn `update-notice/120.txt` reads idle because `idle_composer` outranks that rule |
-| Launch (P1, `scripts/smoke`) | Through a pohunek build of core `368a2d32c` (v0.39.0) in a loopback-only namespace: `--agent muse`, with `{"schema_version":1,"provider":"echo"}` in Muse's `settings.json`, launches `muse-bin-<release> --trust-workspace` with `MUSE_NO_AUTO_UPDATE=1` in its environment, shows no trust dialog, reaches the composer, renders an echo turn, and after stop `session resume` runs `muse-bin-<release> --trust-workspace -c managed_hooks_env_vars=[...] resume <id>`; no `trust.json` is left; with a profile of `--trust-workspace --provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged |
-| Identity and resume (P2, `scripts/smoke`) | With `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args, --trust-workspace among them> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with `TBH_MANAGED_HOOKS_PATH` and `POHUNEK_SESSION_ID` in its environment and the reference unchanged |
+| Launch (P1, `scripts/smoke`) | Earlier descriptor (0.1.0, `--trust-workspace` on every launch), core `368a2d32c` (v0.39.0), loopback-only namespace: `--agent muse` reached the composer with an echo turn, resume reused the arguments, a profile with `--trust-workspace --provider echo` took initial input, the launcher recorded no update check. Descriptor 0.2.0 passes no `--trust-workspace`: **unverified (the rewritten `scripts/smoke` has not run against 0.2.0)** are the withheld flag, the trust dialog and `session_input_blocked` / `session_input_not_ready` in an unproven checkout, the dropped profile flag, and the later stages in a workspace trusted through Muse's own trust record |
+| Identity and resume (P2, `scripts/smoke`) | Earlier descriptor (0.1.0), core v0.39.0: with `--provider echo` the first turn bound the session to the Muse session id naming its `<uuid>/session.jsonl` directory, the reminder threads were filtered, and `session resume` ran `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <id>` in the workspace with the reference unchanged. Under 0.2.0 the resume argument list carries no `--trust-workspace`: **unverified until `scripts/smoke` runs against 0.2.0** |
 | Recovery and profile key (P3, `scripts/smoke`) | With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
 | Input on the approval dialog (stub, `scripts/smoke`) | With the stub's scripted bash call the session reads `blocked` on `Would you like to run the following command?`, `session input` is refused with `session_input_blocked`, the command does not run and the dialog still shows |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
@@ -339,7 +371,7 @@ the install files were unchanged, with the network reachable.
 - That `MUSE_NO_AUTO_UPDATE=1` leaves the network untouched for the binary itself (the launcher part is read from its source and observed; the namespace has no route, so an attempt would fail silently).
 - The update-notice rule `launcher_update_notice` in a live session: the kit test reads the captured launcher line alone, as the daemon sees it before the TUI draws. No live pohunek session was observed reading `working` on it.
 - `compat/screens/update-notice/120.txt` has Muse's `system SSH configuration projection omitted` notice in its footer, and no other committed screen does. That file comes from the user-namespace capture, not the VM run; that this run type causes the notice is unverified (`clear/120.txt` is also a user-namespace capture and lacks it). The notice line itself is unaffected. A VM recapture is not done.
-- Any macOS behaviour of the package (P4).
+- Any macOS behaviour of the package in a live session (P4); the kit reads the committed macOS screens only.
 
 Prior art cited by the plan (agent-deck, par-term, Zentty, Paradev, t3code,
 openclaw) was not re-verified here.
