@@ -413,7 +413,7 @@ fn the_macos_working_screens_read_working_through_the_status_line_rule() {
         assert_eq!(
             screen_activity(&definition, &text, width),
             Some(AgentActivity::Working),
-            "working/{width}.txt: the composer below the status line must not win"
+            "working/{width}.txt: only working_status_line reads the `\u{25c6}` status line"
         );
     }
 }
