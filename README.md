@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran on earlier core builds) |
+| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -217,6 +217,14 @@ Limits:
   `$XDG_CONFIG_HOME/muse/trust.json`, so a new worktree asks again, and a root
   the operator answered once is trusted by Muse from then on whatever core
   decides.
+- On a slow host Muse can need longer than core's initial-input startup grace
+  (`input.initial_startup_grace_ms`, 5 s by default) to draw its composer, even
+  in a root it trusts: `session new --input` then fails with
+  `session_input_not_ready` and the session is rolled back (seen twice in a 2
+  vCPU qemu guest). Raise the grace, or start the session without `--input` and
+  send the input once the composer shows. `scripts/smoke` creates such a
+  session again up to three times; no passing run needed the retry, so that
+  path is unverified.
 - A host profile that resolves 0.2.0 cannot force `--trust-workspace`: core
   v0.41.0 and later drop a run of the declared flag from descriptor and profile
   `args`. Core v0.40.x refuses this descriptor (it requires a `[fork]` table).
