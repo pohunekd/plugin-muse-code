@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
+| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran on earlier core builds) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -217,7 +217,7 @@ scripts/smoke --root /path/to/scratch \
   --core-bin /path/to/core/target/debug --muse-dir /path/to/muse/install   # the release in `compat/RELEASE`
 ```
 
-`kit/` pins the core revision it is proven against (`kit/Cargo.toml`) and the
+`kit/` pins the core revision it is proven against, v0.43.1 (`kit/Cargo.toml`), and the
 Rust toolchain of that revision (`kit/rust-toolchain.toml`). Move both together
 with a new core release, after the nightly core has passed the same tests.
 
