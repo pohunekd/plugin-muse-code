@@ -80,7 +80,7 @@ fn the_descriptor_declares_the_launch_contract_of_the_captured_release() {
             "AGENTS.md",
             "CLAUDE.md"
         ],
-        "the paths the probe saw Muse load once it trusts a checkout"
+        "the paths Muse loads per the D1 probe and the hook captures"
     );
     assert!(
         !definition.prompt_arg(),

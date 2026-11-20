@@ -141,14 +141,15 @@ work.
 
 What the package does:
 
-- Launches `muse` with `MUSE_NO_AUTO_UPDATE=1`. `--trust-workspace` is not a
-  launch argument: the descriptor declares it as `trusted_checkout_args` and core
-  appends it (also on resume) only for the operator's own checkout, where core
+- Launches `muse` with `MUSE_NO_AUTO_UPDATE=1`. In version 0.2.0 `--trust-workspace`
+  is not a launch argument: the descriptor declares it as `trusted_checkout_args`
+  and core appends it (also on resume) to a session or profile that resolves
+  0.2.0, only for the operator's own checkout, where core
   proves over https from GitHub that the project's `origin_url` is a public
   repository listed in `[checkout_trust] trusted_repositories` of `service.toml`
   and that every declared path equals the tree of the remote `HEAD`
-  (`checkout-trust-args-v1`; core >= 0.41.0, the release that decides the
-  arguments on the create-time checkout and drops a profile's flag). The declared
+  (`checkout-trust-args-v1`; core >= 0.41.0: v0.40.x refuses the descriptor
+  because it has no `[fork]` table). The declared
   paths are `.agents`, `.claude`, `.codex`, `.muse`, `AGENTS.md` and
   `CLAUDE.md`: an ad-hoc probe of Muse 1.4.14 (loopback only, echo provider; not
   a kit capture) loaded project skills from `.agents/skills`, `.claude/skills`
@@ -181,6 +182,17 @@ What the package does:
 
 Limits:
 
+- Upgrade from 0.1.0: installing 0.2.0 does not remove the 0.1.0 digest, and
+  0.1.0 launches every session with `--trust-workspace`. A host profile that
+  pins the 0.1.0 `digest` keeps resolving it, so repin every Muse host profile
+  to the 0.2.0 digest. A session created under 0.1.0 resumes from its frozen
+  0.1.0 definition (core adopts a newer package on resume only for an official
+  index install, and a profile session also needs the profile pinned to the
+  newer digest) and keeps the flag for any checkout: stop such sessions and
+  create them again instead of resuming them. Remove or disable the 0.1.0
+  package so nothing resolves its digest. The guarantees below hold for
+  sessions and profiles that resolve 0.2.0 (traced in core's source by a
+  reviewer, not run).
 - Operator step: add `owner/repo` (lower case) to `[checkout_trust]
   trusted_repositories` in the host's `service.toml` for every repository whose
   checkouts Muse may trust. Only public GitHub repositories qualify, and the
@@ -192,8 +204,10 @@ Limits:
   or removed, and `.claude` or `.codex` local settings do the same. Core checks
   only the declared paths, not what a hook runs: a `.muse/hooks.json` hook that
   calls a script outside them (for example `./scripts/x.sh`) runs that file
-  unchecked, so list only repositories whose hooks and skills reference nothing
-  outside the declared paths. This follows the owner's fail-closed ruling on
+  unchecked, so list only repositories whose hooks, skills and project-scope
+  plugin sources (`muse plugins install --scope project <path>`, whose source
+  can lie outside the declared paths; unverified) reference nothing outside the
+  declared paths. This follows the owner's fail-closed ruling on
   #18, and it also withholds trust from private and unlisted repositories.
 - A withheld flag leaves Muse's trust dialog on screen in every root Muse does
   not trust yet; `session new --input` there fails with
@@ -203,9 +217,10 @@ Limits:
   `$XDG_CONFIG_HOME/muse/trust.json`, so a new worktree asks again, and a root
   the operator answered once is trusted by Muse from then on whatever core
   decides.
-- A host profile cannot force `--trust-workspace`: core v0.41.0 and later drop a
-  run of the declared flag from descriptor and profile `args` (on v0.40.x a profile
-  that names the flag still trusts new sessions, per the v0.41.0 changelog). A profile that adds
+- A host profile that resolves 0.2.0 cannot force `--trust-workspace`: core
+  v0.41.0 and later drop a run of the declared flag from descriptor and profile
+  `args`. Core v0.40.x refuses this descriptor (it requires a `[fork]` table).
+  A profile that adds
   `--yolo` (it also trusts the workspace, and disables approval and the sandbox)
   bypasses the check; do not use it on a checkout you did not verify.
 - The positive case (a listed public checkout launches with the flag, Muse then
@@ -289,9 +304,9 @@ unverified.
 | Package (P1) | `kit` tests: reproducible build with only `detect.toml` and `runtime.toml`, daemon accepts the descriptor, banner `Muse Code 1.4.14 (1.4.14-R7309.1)` is in range and 1.4.13, 1.5.0 and malformed banners are refused, the captured process matches, 55 screens of 15 scenarios read as the case table says, a spinner title reads working; the macOS `working` screens at 120 and 200 columns (the `◆` status line) read working through `working_status_line`; the launcher update-notice line alone (Linux and macOS captures) reads working through `launcher_update_notice`, while the drawn `update-notice/120.txt` reads idle because `idle_composer` outranks that rule |
 | Launch (P1, `scripts/smoke`) | Descriptor 0.2.0 through the pohunek v0.43.1 release binaries, Muse 1.4.14, in a loopback-only namespace inside a `-nic none` qemu/KVM guest (Debian 13, 2 vCPU, 2 GiB): in a checkout that no `[checkout_trust]` list names, no launch carries `--trust-workspace` (also not from a profile that names it), Muse shows its trust dialog, the session reads `blocked`, `session input` is refused with `session_input_blocked` and an initial input with `session_input_not_ready`, and no trust record is written; in a workspace that Muse's own trust record (`trust.json`) trusts, `--agent muse` launches without the flag, shows no dialog, reaches the composer, renders an echo turn, and after stop `session resume` runs `muse-bin-<release> -c managed_hooks_env_vars=[...] resume <id>`; with a profile of `--provider echo` the initial input reaches the composer, `echo: <prompt>` renders, the session reads `working` during the delayed echo and `idle` after it, a second input works; the launcher records no update check and the release files stay unchanged. The positive case (a listed public checkout launches with the flag) is unverified with Muse; the seeded trust record is a probe format, not a kit capture |
 | Identity and resume (P2, `scripts/smoke`) | Same run (descriptor 0.2.0, core v0.43.1): with `--provider echo` the first turn binds the session to the Muse session id that names its `<uuid>/session.jsonl` directory, the reminder threads are filtered, and `session resume` runs `muse-bin-<release> <profile args> -c managed_hooks_env_vars=[...] resume <id>` in the workspace, without `--trust-workspace`, with `TBH_MANAGED_HOOKS_PATH` and `POHUNEK_SESSION_ID` in its environment and the reference unchanged |
-| Recovery and profile key (P3, `scripts/smoke`) | With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
-| Input on the approval dialog (stub, `scripts/smoke`) | With the stub's scripted bash call the session reads `blocked` on `Would you like to run the following command?`, `session input` is refused with `session_input_blocked`, the command does not run and the dialog still shows |
-| Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run saw no `.muse-update-checked-at` and no changed file |
+| Recovery and profile key (P3, `scripts/smoke`) | Descriptor 0.2.0, core v0.43.1, in a `-nic none` qemu/KVM guest, in a workspace trusted through the seeded Muse trust record: With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
+| Input on the approval dialog (stub, `scripts/smoke`) | Descriptor 0.2.0, core v0.43.1, in a `-nic none` qemu/KVM guest, in a workspace trusted through the seeded Muse trust record: With the stub's scripted bash call the session reads `blocked` on `Would you like to run the following command?`, `session input` is refused with `session_input_blocked`, the command does not run and the dialog still shows |
+| Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run (descriptor 0.2.0, core v0.43.1, qemu/KVM guest) saw no `.muse-update-checked-at` and no changed file |
 
 ### macOS arm64
 

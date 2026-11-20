@@ -9,11 +9,14 @@
 # `--provider echo` or `scripts/model-stub` on the loopback with a placeholder
 # key, and the approval dialog is only looked at, never answered.
 #
-# The package passes `--trust-workspace` only for a checkout that core proves
-# to be the operator's own over https from GitHub, which this isolated daemon
-# (no listed repository, loopback only) cannot do. The first stage shows the withheld flag and Muse's trust
-# dialog; the later stages run in a workspace that Muse's own trust record
-# (`$XDG_CONFIG_HOME/muse/trust.json`, seeded below) already trusts.
+# The package passes `--trust-workspace` only through core's checkout-trust
+# check, which needs a listed GitHub repository and a fetch from github.com.
+# This isolated daemon lists no repository, so core's predicate is not
+# evaluated at all and no launch gets the flag. The first stage shows the
+# withheld flag and Muse's trust dialog; the later stages run in a workspace
+# that Muse's own trust record (`$XDG_CONFIG_HOME/muse/trust.json`, seeded
+# below) already trusts. The predicate itself (listed but unreachable,
+# `checkout_trust.failed`) is not exercised here.
 #
 #   scripts/smoke --root DIR --core-bin DIR --muse-dir DIR
 #
@@ -131,11 +134,9 @@ install_listing() { find "$1" -mindepth 1 -printf '%P\n' | sort | tr '\n' ' '; }
 before_files="$(install_listing "$HOME_DIR/.local/bin")"
 git -C "$WS" init -q .
 git -C "$WS" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m init
-# A checkout with a GitHub origin that no `[checkout_trust]` list names, and
-# that has no Muse trust record.
+# A checkout that has no Muse trust record.
 git -C "$WS_UNTRUSTED" init -q .
 git -C "$WS_UNTRUSTED" -c user.name=smoke -c user.email=smoke@example.invalid commit -q --allow-empty -m init
-git -C "$WS_UNTRUSTED" remote add origin https://github.com/example-owner/example-repo
 
 # Every command runs with a cleared environment, so nothing of the caller's
 # POHUNEK_* or credential variables reaches the daemon or the CLI.
@@ -225,7 +226,7 @@ pk plugin select dev.runtime.muse --digest "${digest#sha256:}" >/dev/null
 pk plugin doctor | grep -q 'No problems found' || die "plugin doctor reports a problem"
 
 # A profile replaces the descriptor's arguments with the credential-free
-# provider. `muse-listed` also names --trust-workspace, which core drops from
+# provider. `muse-flag` also names --trust-workspace, which core drops from
 # every launch because only the checkout-trust check may add it.
 cat >"$HOME_DIR/.config/pohunek/agents/muse-echo.toml" <<EOF
 base = "muse"
@@ -234,14 +235,14 @@ digest = "$digest"
 program = "muse"
 args = ["--provider", "echo", "--echo-delay-ms", "$ECHO_DELAY_MS"]
 EOF
-cat >"$HOME_DIR/.config/pohunek/agents/muse-listed.toml" <<EOF
+cat >"$HOME_DIR/.config/pohunek/agents/muse-flag.toml" <<EOF
 base = "muse"
 package = "dev.runtime.muse"
 digest = "$digest"
 program = "muse"
 args = ["--trust-workspace", "--provider", "echo"]
 EOF
-chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-echo.toml" "$HOME_DIR/.config/pohunek/agents/muse-listed.toml"
+chmod 600 "$HOME_DIR/.config/pohunek/agents/muse-echo.toml" "$HOME_DIR/.config/pohunek/agents/muse-flag.toml"
 
 activity_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .activity // "none"'; }
 session_id() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .id'; }
@@ -251,9 +252,9 @@ settled() { case "$(activity_of "$1")" in idle | blocked) return 0 ;; esac; retu
 native_of() { pk session list --json | jq -r --arg n "$1" '.ok[] | select(.name == $n) | .native_session_id // empty'; }
 
 # --- 0. an unproven checkout: no flag, Muse's trust dialog holds the session
-# The isolated daemon lists no `[checkout_trust]` repository (and the namespace
-# has no route to GitHub), so core cannot prove the checkout and withholds
-# `--trust-workspace`; a profile that names the flag gets it dropped.
+# The isolated daemon lists no `[checkout_trust]` repository, so core's
+# predicate is not evaluated and `--trust-workspace` is withheld; a profile that
+# names the flag gets it dropped.
 # Muse also reads its provider from `settings.json`, so the bare session runs
 # the descriptor's own arguments with the credential-free provider.
 muse_settings="$HOME_DIR/.config/muse/settings.json"
@@ -275,7 +276,7 @@ assert_dialog_holds() { # <agent> <name>
   pk session stop "$id" >/dev/null
 }
 assert_dialog_holds muse bare-untrusted
-assert_dialog_holds muse-listed listed-untrusted
+assert_dialog_holds muse-flag flag-untrusted
 refusal="$(pk session new --agent muse-echo --cwd "$WS_UNTRUSTED" --name unready --input "$PROMPT" \
   --input-ack-timeout-ms "$INPUT_ACK_MS" --yes --json || true)"
 [[ "$(jq -r '.err.code' <<<"$refusal")" == session_input_not_ready ]] || die "an initial input reached the trust dialog: $refusal"

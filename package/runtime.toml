@@ -65,7 +65,10 @@ reference_kind = "id"
 args = ["resume", "{reference}"]
 
 # Muse forks only inside its TUI (`/fork`); no launch argument forks, so the
-# descriptor declares no fork.
+# descriptor declares no fork. Leaving out `[fork]` is also what makes cores
+# before 0.41.0 refuse this descriptor, which they require it to carry; those
+# cores do not drop a profile's `--trust-workspace`, so the table must not
+# return while 0.2.0 relies on that.
 
 # Muse chooses the session id; the root thread's SessionStart hook reports it
 # with the first turn. After `/clear` Muse 1.4.14 runs that hook without the
