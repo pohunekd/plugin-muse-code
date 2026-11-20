@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
+| Status | **pre-release (P3)**: admitted in the official plugin index since `index-1795175178` and installed by id on Linux x86_64 and macOS arm64 with core v0.43.1; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `368a2d32c`, v0.39.0 (see `kit/Cargo.toml`) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -119,7 +119,7 @@ A new Muse release is captured by re-running the kit before the lock moves:
 
 ## Install and use
 
-The plugin is not in the plugin index yet. Once admitted, install it by id (core >= 0.40.0): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). Until then, install it from a checkout:
+The plugin is admitted in the official plugin index since `index-1795175178` (version 0.1.0). Install it by id (core >= 0.40.0): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
 
 ```bash
 cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
