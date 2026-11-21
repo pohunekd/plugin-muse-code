@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **0.2.0 released and admitted to the official plugin index** (entry `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index`, since `index-1795199465`; 0.1.0 since `index-1795175178`). An install of either version by id has no committed evidence in this repository, so it is `unverified` (see the platform tables under "Verified behaviour"). The package covers launch, program status, session identity, resume and subagents; transcript attribution is unverified end to end; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
+| Status | **0.2.0 released and admitted to the official plugin index** (entry `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index`, since `index-1795199465`; 0.1.0 since `index-1795175178`). Version 0.1.0 was installed by id on Linux x86_64 and macOS arm64 with core v0.43.1 ([issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694), admission run in [pohunek-plugin-index#10](https://github.com/pohunekd/pohunek-plugin-index/pull/10)); that record is not committed under `compat/`. Installing 0.2.0 by id is `unverified` (see the platform tables under "Verified behaviour"). The package covers launch, program status, session identity, resume and subagents; transcript attribution is unverified end to end; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -318,7 +318,7 @@ unverified.
 
 ### Status per platform
 
-Each row cites the committed evidence or says `unverified`. "Section" names a
+Each row cites its evidence (committed, or a linked record marked as outside the repository) or says `unverified`. "Section" names a
 section of this README; paths are in this repository.
 
 #### Linux x86_64
@@ -332,8 +332,8 @@ section of this README; paths are in this repository.
 | Launch, input refusal, resume, recovery (echo provider or stub) | verified | rows "Launch (P1, `scripts/smoke`)", "Recovery and profile key (P3, `scripts/smoke`)", "Input on the approval dialog (stub, `scripts/smoke`)"; the smoke output itself is not committed |
 | Real model: plain turn, approval, question, subagent, resume | verified | section "Real model, Linux (#28)", `compat/real/linux/` |
 | `/clear` moves the session reference | not working (evidence only) | scenario 7 of "Real model, Linux (#28)", `compat/real/linux/7-1/` |
-| Install of 0.2.0 by id from the official index | unverified | no committed run; the index entry is `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index` |
-| Install of 0.1.0 by id | unverified | no committed run |
+| Install of 0.1.0 by id (core v0.43.1) | verified (record outside the repository) | [issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694); admission run in [pohunek-plugin-index#10](https://github.com/pohunekd/pohunek-plugin-index/pull/10); not committed under `compat/` |
+| Install of 0.2.0 by id from the official index | unverified | no run found; the index entry is `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index` |
 | Checkout-trust positive case (listed public checkout launches with the flag) | unverified | section "What the package does" |
 | Transcript attribution of a Muse started outside Pohunek | unverified | section "Unverified" |
 | Approval variants beyond a single-stage shell command, compaction hooks, `StopFailure`, `Interrupt` | unverified | section "Unverified" |
@@ -351,7 +351,8 @@ section of this README; paths are in this repository.
 | Stub screens, pane process | unverified | section "macOS arm64" (not captured) |
 | Default Keychain credential backend | unverified | section "macOS arm64" |
 | Real-model run | unverified | section "Unverified" |
-| Install of 0.2.0 or 0.1.0 by id | unverified | no committed run |
+| Install of 0.1.0 by id (core v0.43.1) | verified (record outside the repository) | [issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694); not committed under `compat/` |
+| Install of 0.2.0 by id | unverified | no run found |
 | Package in a live pohunek session | unverified | section "Unverified" (P4) |
 
 ### macOS arm64
