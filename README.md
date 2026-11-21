@@ -9,7 +9,7 @@ terminal coding agent.
 | Package id | `pohunek.runtime.muse` |
 | Runtime id (`--agent`) | `muse` |
 | Upstream | Meta Muse Code (proprietary CLI; the SDK and wire schema are MIT) |
-| Status | **pre-release (P3)**: admitted in the official plugin index (0.1.0 since `index-1795175178`, 0.2.0 since `index-1795199465`); 0.1.0 was installed by id on Linux x86_64 and macOS arm64 with core v0.43.1, installing 0.2.0 by id is `unverified`; launch, program status, session identity, resume, subagents and transcript attribution (unverified end to end); no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
+| Status | **0.2.0 released and admitted to the official plugin index** (entry `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index`, since `index-1795199465`; 0.1.0 since `index-1795175178`). Version 0.1.0 was installed by id on Linux x86_64 and macOS arm64 with core v0.43.1 ([issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694), admission run in [pohunek-plugin-index#10](https://github.com/pohunekd/pohunek-plugin-index/pull/10)); that record is not committed under `compat/`. Installing 0.2.0 by id is `unverified` (see the platform tables under "Verified behaviour"). The package covers launch, program status, session identity, resume and subagents; transcript attribution is unverified end to end; no fork. The package is proven against Muse Code 1.4.14 (`compat/RELEASE`) and core `e346eb76c`, v0.43.1 (see `kit/Cargo.toml`; the `kit` tests run against it, the `scripts/smoke` rows below ran with the v0.43.1 release binaries in a qemu/KVM guest) |
 
 The plugin carries data and evidence only (descriptor, detect rules, captures).
 It needs a core with every runtime feature its descriptor lists in `requires`
@@ -315,6 +315,45 @@ unverified.
 | Recovery and profile key (P3, `scripts/smoke`) | Descriptor 0.2.0, core v0.43.1, in a `-nic none` qemu/KVM guest, in a workspace trusted through the seeded Muse trust record: With the session log moved away `session resume` is refused with `agent_native_reference_missing`; a profile with `--provider meta --base-url` on the loopback stub and a placeholder `META_API_KEY` in `[env]` runs a turn that renders the stub reply, and the placeholder appears in no file below `--root` except the profile |
 | Input on the approval dialog (stub, `scripts/smoke`) | Descriptor 0.2.0, core v0.43.1, in a `-nic none` qemu/KVM guest, in a workspace trusted through the seeded Muse trust record: With the stub's scripted bash call the session reads `blocked` on `Would you like to run the following command?`, `session input` is refused with `session_input_blocked`, the command does not run and the dialog still shows |
 | Update opt-out | In the launcher source `MUSE_NO_AUTO_UPDATE=1` skips the only code that downloads (`update_launcher`, `update_binary`) once a binary is installed; the smoke run (descriptor 0.2.0, core v0.43.1, qemu/KVM guest) saw no `.muse-update-checked-at` and no changed file |
+
+### Status per platform
+
+Each row cites its evidence (committed, or a linked record marked as outside the repository) or says `unverified`. "Section" names a
+section of this README; paths are in this repository.
+
+#### Linux x86_64
+
+| Area | Status | Evidence |
+|---|---|---|
+| Muse install and version banner | verified | `compat/install/`, `compat/RELEASE` |
+| Screens, OSC 7501, titles | verified | `compat/screens/`, `compat/osc7501/`, `kit` tests (row "Package (P1)") |
+| Hooks and hook environment | verified | `compat/hooks/`, rows "Hooks" and "Hook environment" |
+| Session store and identity | verified | `compat/sessions/`, row "Identity and resume (P2, `scripts/smoke`)" |
+| Launch, input refusal, resume, recovery (echo provider or stub) | verified | rows "Launch (P1, `scripts/smoke`)", "Recovery and profile key (P3, `scripts/smoke`)", "Input on the approval dialog (stub, `scripts/smoke`)"; the smoke output itself is not committed |
+| Real model: plain turn, approval, question, subagent, resume | verified | section "Real model, Linux (#28)", `compat/real/linux/` |
+| `/clear` moves the session reference | not working (evidence only) | scenario 7 of "Real model, Linux (#28)", `compat/real/linux/7-1/` |
+| Install of 0.1.0 by id (core v0.43.1) | verified (record outside the repository) | [issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694); admission run in [pohunek-plugin-index#10](https://github.com/pohunekd/pohunek-plugin-index/pull/10); not committed under `compat/` |
+| Install of 0.2.0 by id from the official index | unverified | no run found; the index entry is `official/pohunek.runtime.muse/0.2.0.toml` in `pohunekd/pohunek-plugin-index` |
+| Checkout-trust positive case (listed public checkout launches with the flag) | unverified | section "What the package does" |
+| Transcript attribution of a Muse started outside Pohunek | unverified | section "Unverified" |
+| Approval variants beyond a single-stage shell command, compaction hooks, `StopFailure`, `Interrupt` | unverified | section "Unverified" |
+
+#### macOS arm64
+
+| Area | Status | Evidence |
+|---|---|---|
+| Muse install and version banner | verified | `compat/macos-arm64/install/` |
+| Screens (login, api-key, trust, idle, working, done, update-notice), OSC 7501, titles | verified | `compat/macos-arm64/screens/`, `compat/macos-arm64/osc7501/`, section "macOS arm64" |
+| Credential backend with the file backend forced | verified | `compat/macos-arm64/sessions/credential-backend-*.txt` |
+| Default-HOME tree | verified | `compat/macos-arm64/sessions/default-home-tree.txt` |
+| Package read of the committed macOS screens | verified | row "Package (P1)", `kit` tests |
+| Hooks, session resume, fork | unverified | section "macOS arm64" (not captured) |
+| Stub screens, pane process | unverified | section "macOS arm64" (not captured) |
+| Default Keychain credential backend | unverified | section "macOS arm64" |
+| Real-model run | unverified | section "Unverified" |
+| Install of 0.1.0 by id (core v0.43.1) | verified (record outside the repository) | [issue #5 comment](https://github.com/pohunekd/plugin-muse-code/issues/5#issuecomment-7038915694); not committed under `compat/` |
+| Install of 0.2.0 by id | unverified | no run found |
+| Package in a live pohunek session | unverified | section "Unverified" (P4) |
 
 ### macOS arm64
 
