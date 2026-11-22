@@ -123,7 +123,18 @@ A new Muse release is captured by re-running the kit before the lock moves:
 
 ## Install and use
 
-The plugin is admitted in the official plugin index: version 0.1.0 since `index-1795175178` (it launches every session with `--trust-workspace`) and version 0.2.0 since `index-1795199465`. Install it by id (core >= 0.41.0 for version 0.2.0, tested with v0.43.1): `pohunek plugin install pohunek.runtime.muse` (review the preview, then repeat the printed command with `--yes`). To install from a checkout instead:
+```bash
+pohunek plugin install pohunek.runtime.muse
+```
+
+The install is a two-step review: the command above runs a dry run and prints
+what the package declares together with the resolved `<package-id>@<version>`;
+repeat the printed command with `--yes` to install it from the official plugin
+index (version 0.2.0 needs core >= 0.41.0, tested with v0.43.1).
+
+The plugin is admitted in the official plugin index: version 0.1.0 since
+`index-1795175178` (it launches every session with `--trust-workspace`) and
+version 0.2.0 since `index-1795199465`. To install from a checkout instead:
 
 ```bash
 cargo xtask package build /path/to/plugin-muse-code/package --output muse.tar.zst   # in zajca/pohunek
